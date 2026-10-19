@@ -187,8 +187,47 @@ function initMiddleEarthMap() {
   renderMiddleEarthProgress(getTotalKmWalked(), true);
 }
 
+function toGmapsLatLng(c) {
+  return { lat: (c[0] - 500) * 0.02, lng: (c[1] - 889) * 0.02 };
+}
+
+function isLeafletCanvasVisible() {
+  const el = document.getElementById('middle-earth-map');
+  return Boolean(
+    meMap &&
+    el &&
+    !el.classList.contains('hidden') &&
+    el.clientWidth > 0 &&
+    el.clientHeight > 0
+  );
+}
+
+function flyToMiddleEarthCoord(coords, zoom = 0.2, duration = 0.9) {
+  if (isLeafletCanvasVisible()) {
+    meMap.invalidateSize();
+    meMap.flyTo(coords, zoom, { duration });
+  }
+  if (gmapsMeInstance && window.google?.maps) {
+    gmapsMeInstance.panTo(toGmapsLatLng(coords));
+  }
+}
+
+function fitMiddleEarthQuestBounds() {
+  if (isLeafletCanvasVisible()) {
+    meMap.invalidateSize();
+    meMap.flyToBounds([[180, 350], [860, 1580]], { duration: 0.8 });
+  }
+  if (gmapsMeInstance && window.google?.maps) {
+    gmapsMeInstance.panTo(toGmapsLatLng([520, 965]));
+    gmapsMeInstance.setZoom(6);
+  }
+}
+
 function renderMiddleEarthProgress(kmValue, centerOnFrodo = false) {
   const prog = getQuestProgressData(kmValue);
+
+  // Always update HUD and cards first so UI state stays in sync even if map tab is hidden
+  updateHudAndCards(prog);
 
   if (meMap) {
     walkedGlowLayer.setLatLngs(prog.walkedCoords);
@@ -266,10 +305,6 @@ function renderMiddleEarthProgress(kmValue, centerOnFrodo = false) {
         <blockquote class="map-popup-quote">"${prog.currentMilestone.quote}"</blockquote>
       </div>
     `);
-
-    if (centerOnFrodo) {
-      meMap.flyTo(prog.frodoCoords, 0.2, { duration: 0.9 });
-    }
   }
 
   // Also update Google Maps native GroundOverlay instance if active
@@ -277,7 +312,9 @@ function renderMiddleEarthProgress(kmValue, centerOnFrodo = false) {
     updateNativeGoogleMapOverlay(prog);
   }
 
-  updateHudAndCards(prog);
+  if (centerOnFrodo) {
+    flyToMiddleEarthCoord(prog.frodoCoords, 0.2, 0.9);
+  }
 }
 
 // Update Top HUD, Bottom Map Card, Waypoints List, and Journal
@@ -738,8 +775,8 @@ function renderWaypointsTimeline(filter = 'all') {
       if (idx !== -1) {
         switchTab('tab-map');
         const ms = MILESTONES[idx];
-        meMap.flyTo(ms.coords, 0.7, { duration: 0.9 });
-        if (milestoneMarkers[idx]) {
+        flyToMiddleEarthCoord(ms.coords, 0.7, 0.9);
+        if (milestoneMarkers[idx] && isLeafletCanvasVisible()) {
           setTimeout(() => milestoneMarkers[idx].openPopup(), 450);
         }
       }
@@ -808,8 +845,15 @@ function switchTab(tabId) {
   document.getElementById(tabId)?.classList.add('active');
   document.querySelector(`.nav-item[data-tab="${tabId}"]`)?.classList.add('active');
 
-  if (tabId === 'tab-map' && meMap) {
-    setTimeout(() => meMap.invalidateSize(), 60);
+  if (tabId === 'tab-map') {
+    if (isLeafletCanvasVisible()) {
+      meMap.invalidateSize();
+    }
+    setTimeout(() => {
+      if (isLeafletCanvasVisible()) {
+        meMap.invalidateSize();
+      }
+    }, 60);
   }
   if (tabId === 'tab-walk') {
     setTimeout(() => {
@@ -829,18 +873,20 @@ function setupEventListeners() {
   document.getElementById('hud-quick-stats').addEventListener('click', () => {
     switchTab('tab-map');
     const prog = getQuestProgressData(getTotalKmWalked());
-    meMap.flyTo(prog.frodoCoords, 0.6, { duration: 0.8 });
+    flyToMiddleEarthCoord(prog.frodoCoords, 0.6, 0.8);
   });
 
   // Map Floating Buttons
   document.getElementById('btn-locate-frodo').addEventListener('click', () => {
     const prog = getQuestProgressData(getTotalKmWalked());
-    meMap.flyTo(prog.frodoCoords, 0.6, { duration: 0.8 });
-    frodoMarker?.openPopup();
+    flyToMiddleEarthCoord(prog.frodoCoords, 0.6, 0.8);
+    if (isLeafletCanvasVisible()) {
+      frodoMarker?.openPopup();
+    }
   });
 
   document.getElementById('btn-fit-quest').addEventListener('click', () => {
-    meMap.flyToBounds([[180, 350], [860, 1580]], { duration: 0.8 });
+    fitMiddleEarthQuestBounds();
   });
 
   document.getElementById('btn-toggle-labels').addEventListener('click', (e) => {
@@ -912,9 +958,9 @@ function setupEventListeners() {
   document.getElementById('btn-save-map-walk').addEventListener('click', () => {
     const km = getPlottedKm();
     if (km >= 0.01) {
-      addWalkLog(km, new Date().toISOString().slice(0, 10), 'GPS / Mapped Route Walk');
       clearPlottedRoute();
       switchTab('tab-map');
+      addWalkLog(km, new Date().toISOString().slice(0, 10), 'GPS / Mapped Route Walk');
     }
   });
 
@@ -974,11 +1020,11 @@ function setupEventListeners() {
     const dateVal = document.getElementById('input-walk-date').value;
     const noteVal = document.getElementById('input-walk-note').value.trim() || 'Daily Walk';
 
-    addWalkLog(km, dateVal, noteVal);
     amountInput.value = '';
     document.getElementById('input-walk-note').value = '';
     updateConversionPreview();
     switchTab('tab-map');
+    addWalkLog(km, dateVal, noteVal);
   });
 
   // Google Maps Sync & API Key
@@ -1094,7 +1140,7 @@ function setupEventListeners() {
     document.getElementById('milestone-modal').classList.add('hidden');
     switchTab('tab-map');
     const prog = getQuestProgressData(getTotalKmWalked());
-    meMap.flyTo(prog.frodoCoords, 0.7, { duration: 0.9 });
+    flyToMiddleEarthCoord(prog.frodoCoords, 0.7, 0.9);
   });
 
   // PWA Install Prompt Handling for OnePlus Nord Chrome
