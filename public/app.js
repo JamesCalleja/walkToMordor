@@ -7,14 +7,7 @@ let state = {
   stepsPerKm: 1312,
   gmapsApiKey: '',
   customWallpaper: '',
-  logs: [
-    {
-      id: 'starter-1',
-      date: new Date().toISOString().slice(0, 10),
-      km: 23.5,
-      note: 'First walk out of Hobbiton toward the Three-Farthing Stone!'
-    }
-  ]
+  logs: []
 };
 
 function loadState() {
@@ -22,6 +15,9 @@ function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.logs)) {
+        parsed.logs = parsed.logs.filter((item) => item.id !== 'starter-1');
+      }
       state = { ...state, ...parsed };
     }
   } catch (err) {

@@ -2,7 +2,7 @@ name: Deploy Walk to Mordor PWA to GitHub Pages
 
 on:
   push:
-    branches: ["main", "fix/background-and-map-display"]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
