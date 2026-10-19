@@ -1,0 +1,33 @@
+name: Unit & Integration Tests
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run Unit & Integration Tests (Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax check application modules
+        run: |
+          node --check public/app.js
+          node --check public/data/milestones.js
+          node --check public/pwa-sw.js
+
+      - name: Run unit & integration test suite
+        run: npm test

@@ -1,0 +1,10 @@
+{
+  "name": "walk-to-mordor",
+  "version": "1.0.0",
+  "description": "Walk to Mordor — Middle-earth Quest Tracker PWA",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

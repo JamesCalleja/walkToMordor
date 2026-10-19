@@ -40,7 +40,7 @@ function saveState() {
 // Compute total kilometers walked from logs
 function getTotalKmWalked() {
   const sum = state.logs.reduce((acc, item) => acc + (Number(item.km) || 0), 0);
-  return Math.max(0, Math.round(sum * 100) / 100);
+  return Math.max(0, Math.round(sum * 10000) / 10000);
 }
 
 // Format distance in kilometers
@@ -404,7 +404,7 @@ function initRealWorldMap() {
   }).addTo(realMap);
 
   // Try to center on user's actual location silently if permission already granted
-  if (navigator.geolocation) {
+  if (typeof navigator !== 'undefined' && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         if (plottedCoords.length === 0) {
@@ -423,6 +423,9 @@ function initRealWorldMap() {
 }
 
 function addRoutePoint(pt) {
+  if (!realMap) {
+    initRealWorldMap();
+  }
   plottedCoords.push(pt);
   realRouteLayer.setLatLngs(plottedCoords);
 
@@ -692,15 +695,19 @@ function updateNativeGoogleMapOverlay(prog) {
 // ============================================================================
 // 3. LOGGING WALKS, CELEBRATING MILESTONES, TIMELINE & JOURNAL (METRIC)
 // ============================================================================
+let walkIdSeq = 0;
+
 function addWalkLog(kmToAdd, dateStr, noteStr) {
   const prevKm = getTotalKmWalked();
   const prevProg = getQuestProgressData(prevKm);
 
-  const cleanKm = Math.round(Number(kmToAdd) * 100) / 100;
+  const rawKm = Number(kmToAdd);
+  if (!rawKm || rawKm <= 0) return;
+  const cleanKm = rawKm >= 0.01 ? Math.round(rawKm * 100) / 100 : Math.round(rawKm * 10000) / 10000;
   if (!cleanKm || cleanKm <= 0) return;
 
   state.logs.unshift({
-    id: `walk-${Date.now()}`,
+    id: `walk-${Date.now()}-${++walkIdSeq}`,
     date: dateStr || new Date().toISOString().slice(0, 10),
     km: cleanKm,
     note: noteStr || 'Walk toward Mordor'
@@ -986,10 +993,14 @@ function setupEventListeners() {
       if (activeEntryType === 'km') {
         amountLabel.textContent = 'Distance Walked (Kilometers)';
         amountInput.step = '0.01';
+        amountInput.min = '0.01';
+        amountInput.max = '1000';
         amountInput.placeholder = 'e.g. 5.0';
       } else {
         amountLabel.textContent = 'Pedometer Step Count';
         amountInput.step = '1';
+        amountInput.min = '1';
+        amountInput.max = '30000';
         amountInput.placeholder = 'e.g. 8500';
       }
       updateConversionPreview();
@@ -1171,8 +1182,7 @@ function applyWallpaper() {
   document.body.style.backgroundImage = `radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), ${wpUrl}`;
 }
 
-// Register Service Worker & Initialize App
-window.addEventListener('DOMContentLoaded', () => {
+function initApp() {
   loadState();
   applyWallpaper();
   initMiddleEarthMap();
@@ -1184,7 +1194,40 @@ window.addEventListener('DOMContentLoaded', () => {
     activateNativeGoogleMapsEngine(state.gmapsApiKey);
   }
 
-  if ('serviceWorker' in navigator) {
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('./pwa-sw.js').catch(() => {});
   }
-});
+}
+
+// Register Service Worker & Initialize App in Browser
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('DOMContentLoaded', initApp);
+}
+
+export {
+  STORAGE_KEY,
+  state,
+  loadState,
+  saveState,
+  getTotalKmWalked,
+  formatDist,
+  getQuestProgressData,
+  toGmapsLatLng,
+  isLeafletCanvasVisible,
+  flyToMiddleEarthCoord,
+  fitMiddleEarthQuestBounds,
+  haversineKm,
+  getPlottedKm,
+  addRoutePoint,
+  clearPlottedRoute,
+  parseGoogleMapsUrl,
+  addWalkLog,
+  renderMiddleEarthProgress,
+  updateHudAndCards,
+  renderWaypointsTimeline,
+  renderJournalAndStats,
+  renderAllViews,
+  switchTab,
+  initApp
+};
+
