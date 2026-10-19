@@ -34,7 +34,7 @@ html, body {
   background-color: var(--bg-obsidian);
   background-image:
     radial-gradient(circle at 50% 25%, rgba(20, 12, 8, 0.25) 0%, rgba(10, 7, 5, 0.72) 100%),
-    var(--custom-wallpaper, url('/assets/eyeOfSauron.jpg'));
+    var(--custom-wallpaper, url('./assets/eyeOfSauron.jpg'));
   background-size: cover;
   background-position: center center;
   background-repeat: no-repeat;

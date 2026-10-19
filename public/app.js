@@ -134,7 +134,7 @@ function initMiddleEarthMap() {
   });
 
   // Add the custom Middle-earth cartographic map image
-  L.imageOverlay('/assets/middle-earth-map.jpg', MAP_BOUNDS).addTo(meMap);
+  L.imageOverlay('./assets/middle-earth-map.jpg', MAP_BOUNDS).addTo(meMap);
   meMap.setMaxBounds([[-180, -180], [MAP_HEIGHT + 180, MAP_WIDTH + 180]]);
 
   // Fit bounds initially
@@ -1120,7 +1120,7 @@ function setupEventListeners() {
 function applyWallpaper() {
   const wpUrl = state.customWallpaper
     ? `url("${state.customWallpaper.replace(/"/g, '\\"')}")`
-    : `url('/assets/eyeOfSauron.jpg')`;
+    : `url('./assets/eyeOfSauron.jpg')`;
   document.documentElement.style.setProperty('--custom-wallpaper', wpUrl);
   document.body.style.backgroundImage = `radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), ${wpUrl}`;
 }
@@ -1139,6 +1139,6 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
 });

@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Walk to Mordor — Middle-earth Quest Tracker</title>
-  <link rel="manifest" href="/manifest.json" />
-  <link rel="icon" type="image/jpeg" href="/assets/app-icon.jpg" />
-  <link rel="apple-touch-icon" href="/assets/app-icon.jpg" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+  <link rel="apple-touch-icon" href="./assets/app-icon.jpg" />
 
   <!-- Google Fonts: Cinzel Decorative, Cinzel, and Cormorant Garamond + Inter for crisp mobile numbers -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -21,14 +21,14 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="./styles.css" />
 </head>
-<body style="background: radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), url('/assets/eyeOfSauron.jpg') center center / cover no-repeat fixed;">
+<body style="background: radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), url('./assets/eyeOfSauron.jpg') center center / cover no-repeat fixed;">
   <div id="app" class="app-shell">
     <!-- Top HUD Header -->
     <header class="hud-header">
       <div class="hud-brand">
-        <img src="/assets/app-icon.jpg" alt="One Ring Icon" class="hud-logo" />
+        <img src="./assets/app-icon.jpg" alt="One Ring Icon" class="hud-logo" />
         <div class="hud-titles">
           <div class="hud-subtitle" id="hud-region-label">THE SHIRE • T.A. 3018</div>
           <h1 class="hud-title">Walk to Mordor</h1>
@@ -422,6 +422,6 @@
     </nav>
   </div>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>

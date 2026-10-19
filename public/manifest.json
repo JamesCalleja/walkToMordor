@@ -1,18 +1,32 @@
 {
+  "id": "./",
   "name": "There and Back Again: Walk to Mordor",
   "short_name": "Walk to Mordor",
   "description": "Track your real-world walking progress along Frodo & Sam's 2,863 km quest from Bag End to Mount Doom on an interactive Middle-earth map.",
-  "start_url": "/",
+  "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#110e0a",
   "theme_color": "#1a140e",
   "icons": [
     {
-      "src": "/assets/app-icon.jpg",
+      "src": "./assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./assets/icon.svg",
       "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "./assets/app-icon.jpg",
+      "sizes": "1024x1024",
       "type": "image/jpeg",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ]
 }
