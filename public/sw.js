@@ -1,4 +1,4 @@
-const CACHE_NAME = 'walk-to-mordor-metric-v6';
+const CACHE_NAME = 'walk-to-mordor-metric-v7';
 const ASSETS = [
   '/',
   '/index.html',

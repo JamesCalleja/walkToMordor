@@ -237,21 +237,43 @@
             </form>
           </div>
 
-          <!-- Mode 3: Google Maps Route Importer & Custom Google Maps Engine -->
+          <!-- Mode 3: Google Maps Timeline Daily Walk Sync & Custom Google Maps Engine -->
           <div id="walk-mode-gmaps" class="walk-mode-box">
             <div class="parchment-card">
-              <h3>1. Import a Google Maps Walking Route</h3>
-              <p class="card-sub">Plan a walking route in the Google Maps app on your OnePlus Nord, copy the shared link, and import its distance in kilometers below:</p>
+              <h3>1. Google Maps Timeline — Sync Day's Walks</h3>
+              <p class="card-sub">Poll your daily walking travel from Google Maps Timeline / Google Fit and add all walks for the day directly to your Fellowship Quest log:</p>
+
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="input-timeline-date">Timeline Date</label>
+                  <input type="date" id="input-timeline-date" />
+                </div>
+                <div class="form-group">
+                  <label for="input-google-client-id">Google OAuth Token / Client ID (Optional)</label>
+                  <input type="password" id="input-google-client-id" placeholder="ya29... or *.apps.googleusercontent.com" />
+                </div>
+              </div>
+
+              <div class="gmaps-actions-row" style="margin-bottom: 12px;">
+                <button type="button" id="btn-poll-google-timeline" class="btn-primary-gold">
+                  🔄 Poll Day's Walks (Google Cloud)
+                </button>
+                <label class="btn-secondary-bronze file-label" style="text-align: center; cursor: pointer;">
+                  📂 Import Timeline.json
+                  <input type="file" id="input-timeline-file" accept=".json,application/json" hidden />
+                </label>
+              </div>
+
               <div class="form-group">
-                <label for="input-gmaps-url">Google Maps Share Link or Coordinates</label>
-                <input type="text" id="input-gmaps-url" placeholder="https://maps.app.goo.gl/... or https://www.google.com/maps/dir/..." />
+                <label for="input-gmaps-url">Or Paste Timeline JSON / Google Maps Link</label>
+                <input type="text" id="input-gmaps-url" placeholder="Paste Timeline.json snippet or https://www.google.com/maps/dir/..." />
               </div>
               <div class="gmaps-actions-row">
                 <button type="button" id="btn-launch-gmaps-directions" class="btn-secondary-bronze">
-                  🗺️ Open Google Maps Walking Planner
+                  🗺️ Open Google Maps Timeline
                 </button>
                 <button type="button" id="btn-parse-gmaps-url" class="btn-primary-gold">
-                  Extract & Plot Route
+                  Extract &amp; Log Walks
                 </button>
               </div>
               <div id="gmaps-parse-feedback" class="feedback-msg hidden"></div>

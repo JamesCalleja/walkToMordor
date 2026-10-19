@@ -7,6 +7,9 @@ import {
   saveState,
   getTotalKmWalked,
   addWalkLog,
+  extractTimelineWalksForDate,
+  importTimelineWalksToQuest,
+  pollGoogleDailyWalks,
   parseGoogleMapsUrl,
   getPlottedKm,
   clearPlottedRoute,
@@ -210,6 +213,10 @@ function setupDomAndMocks() {
     'conversion-preview',
     'input-walk-date',
     'input-walk-note',
+    'input-timeline-date',
+    'input-google-client-id',
+    'btn-poll-google-timeline',
+    'input-timeline-file',
     'input-gmaps-url',
     'btn-launch-gmaps-directions',
     'btn-parse-gmaps-url',
@@ -370,7 +377,9 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     env = setupDomAndMocks();
     state.stepsPerKm = 1312;
     state.gmapsApiKey = '';
+    state.googleAuthToken = '';
     state.customWallpaper = '';
+    state.syncedTimelineIds = [];
     state.logs = [];
     initApp();
   });
@@ -571,4 +580,139 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.equal(getPlottedKm(), 0);
     assert.ok(env.elementsById.get('tab-map').classList.contains('active'));
   });
+
+  it('Issue #7: extracts daily walking travel from Google Maps Timeline (semanticSegments & timelineObjects), logs to Fellowship Quest, and deduplicates repeat imports', () => {
+    const timelineJson = {
+      semanticSegments: [
+        {
+          startTime: '2026-10-19T08:15:00.000Z',
+          endTime: '2026-10-19T08:50:00.000Z',
+          activity: {
+            topCandidate: { type: 'WALKING' },
+            distanceMeters: 3250
+          },
+          timelinePath: [
+            { point: '51.7520°, -1.2577°' },
+            { point: '51.7620°, -1.2577°' }
+          ]
+        },
+        {
+          startTime: '2026-10-19T12:00:00.000Z',
+          endTime: '2026-10-19T12:30:00.000Z',
+          activity: {
+            topCandidate: { type: 'IN_PASSENGER_VEHICLE' },
+            distanceMeters: 15000
+          }
+        },
+        {
+          startTime: '2026-10-19T17:10:00.000Z',
+          endTime: '2026-10-19T17:45:00.000Z',
+          activity: {
+            topCandidate: { type: 'HIKING' },
+            distanceMeters: 2750
+          }
+        },
+        {
+          startTime: '2026-10-18T09:00:00.000Z',
+          endTime: '2026-10-18T09:30:00.000Z',
+          activity: {
+            topCandidate: { type: 'WALKING' },
+            distanceMeters: 4000
+          }
+        }
+      ],
+      timelineObjects: [
+        {
+          activitySegment: {
+            duration: {
+              startTimestamp: '2026-10-19T19:00:00.000Z',
+              endTimestamp: '2026-10-19T19:20:00.000Z'
+            },
+            activityType: 'ON_FOOT',
+            distance: 1500
+          }
+        }
+      ]
+    };
+
+    const extracted = extractTimelineWalksForDate(timelineJson, '2026-10-19');
+    assert.equal(extracted.segments.length, 3);
+    assert.equal(extracted.totalKm, 7.5);
+
+    // Import into Fellowship Quest log
+    const res1 = importTimelineWalksToQuest(timelineJson, '2026-10-19');
+    assert.equal(res1.addedKm, 7.5);
+    assert.equal(res1.segmentsCount, 3);
+    assert.equal(res1.skippedCount, 0);
+    assert.equal(getTotalKmWalked(), 7.5);
+    assert.equal(state.logs.length, 1);
+    assert.match(state.logs[0].note, /Google Maps Timeline \(3 walks\)/);
+
+    // Re-importing the exact same day's Timeline data skips already-synced walks
+    const res2 = importTimelineWalksToQuest(timelineJson, '2026-10-19');
+    assert.equal(res2.addedKm, 0);
+    assert.equal(res2.segmentsCount, 0);
+    assert.equal(res2.skippedCount, 3);
+    assert.equal(getTotalKmWalked(), 7.5);
+    assert.equal(state.logs.length, 1);
+  });
+
+  it('Issue #7: polls daily walking segments from Google Cloud Fitness API, ignores driving, logs walks, and deduplicates', async () => {
+    const mockAggregatePayload = {
+      bucket: [
+        {
+          startTimeMillis: '1792396800000',
+          endTimeMillis: '1792398600000',
+          activity: 7, // Walking
+          dataset: [
+            { point: [{ value: [{ fpVal: 2400 }] }] },
+            { point: [{ value: [{ intVal: 3100 }] }] }
+          ]
+        },
+        {
+          startTimeMillis: '1792400000000',
+          endTimeMillis: '1792403600000',
+          activity: 1, // In vehicle (should be ignored)
+          dataset: [{ point: [{ value: [{ fpVal: 25000 }] }] }]
+        },
+        {
+          startTimeMillis: '1792410000000',
+          endTimeMillis: '1792413600000',
+          activity: 35, // Hiking
+          dataset: [{ point: [{ value: [{ fpVal: 3600 }] }] }]
+        }
+      ]
+    };
+
+    const mockFetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => mockAggregatePayload
+    });
+
+    const poll1 = await pollGoogleDailyWalks({
+      accessToken: 'ya29.mock-token',
+      targetDateStr: '2026-10-19',
+      fetchImpl: mockFetch
+    });
+
+    assert.equal(poll1.segmentsCount, 2);
+    assert.equal(poll1.addedKm, 6);
+    assert.equal(poll1.skippedCount, 0);
+    assert.equal(getTotalKmWalked(), 6);
+    assert.equal(state.logs.length, 1);
+    assert.match(state.logs[0].note, /Google Timeline Poll \(2 walks\)/);
+
+    // Polling again on the same day skips already-logged segments
+    const poll2 = await pollGoogleDailyWalks({
+      accessToken: 'ya29.mock-token',
+      targetDateStr: '2026-10-19',
+      fetchImpl: mockFetch
+    });
+    assert.equal(poll2.addedKm, 0);
+    assert.equal(poll2.segmentsCount, 0);
+    assert.equal(poll2.skippedCount, 2);
+    assert.equal(getTotalKmWalked(), 6);
+  });
 });
+

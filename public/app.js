@@ -7,7 +7,9 @@ const STORAGE_KEY = 'walk_to_mordor_metric_v2';
 let state = {
   stepsPerKm: 1312,
   gmapsApiKey: DEFAULT_GMAPS_API_KEY || '',
+  googleAuthToken: '',
   customWallpaper: '',
+  syncedTimelineIds: [],
   logs: []
 };
 
@@ -20,6 +22,9 @@ function loadState() {
         parsed.logs = parsed.logs.filter((item) => item.id !== 'starter-1');
       }
       state = { ...state, ...parsed };
+      if (!Array.isArray(state.syncedTimelineIds)) {
+        state.syncedTimelineIds = [];
+      }
       if (!state.gmapsApiKey && DEFAULT_GMAPS_API_KEY) {
         state.gmapsApiKey = DEFAULT_GMAPS_API_KEY;
       }
@@ -579,15 +584,391 @@ function openInNativeGoogleMaps() {
   }
 }
 
-// Parse a pasted Google Maps URL to extract coordinates and plot the route in km
-function parseGoogleMapsUrl(urlStr) {
+const WALKING_ACTIVITY_NAMES = new Set(['WALKING', 'ON_FOOT', 'HIKING', 'WALK']);
+// Google Fit activity codes: 7 = Walking, 93 = Walking (fitness), 35 = Hiking
+const WALKING_FIT_ACTIVITY_CODES = new Set([7, 93, 35]);
+
+function parseCoordPairString(str) {
+  if (typeof str !== 'string') return null;
+  const cleaned = str.replace(/°/g, '');
+  const m = cleaned.match(/(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]);
+  const lng = parseFloat(m[2]);
+  if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+    return [lat, lng];
+  }
+  return null;
+}
+
+function normalizeIsoDate(ts) {
+  if (!ts) return null;
+  if (typeof ts === 'number' || /^\d+$/.test(String(ts))) {
+    const d = new Date(Number(ts));
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+  const str = String(ts);
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+    return str.slice(0, 10);
+  }
+  const d = new Date(str);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+/**
+ * Extracts all walking segments for a given date (YYYY-MM-DD) from Google Maps Timeline data.
+ * Supports:
+ * 1. Android On-Device Timeline.json (`semanticSegments` array)
+ * 2. Google Takeout Semantic Location History (`timelineObjects` array with `activitySegment`)
+ * 3. Direct array of segments
+ */
+function extractTimelineWalksForDate(timelineInput, targetDateStr) {
+  const data = typeof timelineInput === 'string' ? JSON.parse(timelineInput) : timelineInput;
+  if (!data || typeof data !== 'object') {
+    return { date: targetDateStr || '', segments: [], totalKm: 0, allCoords: [] };
+  }
+
+  const segments = [];
+  const allCoords = [];
+
+  // 1. Modern Android On-Device Timeline.json (`semanticSegments`)
+  const semanticList = Array.isArray(data.semanticSegments)
+    ? data.semanticSegments
+    : Array.isArray(data)
+    ? data
+    : [];
+
+  semanticList.forEach((seg, idx) => {
+    if (!seg || typeof seg !== 'object') return;
+    const startDate = normalizeIsoDate(seg.startTime);
+    const endDate = normalizeIsoDate(seg.endTime);
+    if (targetDateStr && startDate !== targetDateStr && endDate !== targetDateStr) {
+      return;
+    }
+
+    const rawType =
+      seg.activity?.topCandidate?.type ||
+      seg.activityType ||
+      seg.type ||
+      '';
+    const normType = String(rawType).toUpperCase().trim();
+
+    // Extract timelinePath coordinates if present
+    const segCoords = [];
+    if (Array.isArray(seg.timelinePath)) {
+      seg.timelinePath.forEach((ptObj) => {
+        const pair = parseCoordPairString(ptObj?.point || ptObj?.latLng || '');
+        if (pair) segCoords.push(pair);
+      });
+    }
+
+    const isWalkingActivity = WALKING_ACTIVITY_NAMES.has(normType);
+    if (!isWalkingActivity) return;
+
+    let distMeters = Number(seg.activity?.distanceMeters ?? seg.distanceMeters ?? 0);
+    if ((!distMeters || distMeters <= 0) && segCoords.length >= 2) {
+      let pathKm = 0;
+      for (let i = 1; i < segCoords.length; i++) {
+        pathKm += haversineKm(segCoords[i - 1], segCoords[i]);
+      }
+      distMeters = pathKm * 1000;
+    }
+
+    const km = Math.round((distMeters / 1000) * 10000) / 10000;
+    if (km > 0) {
+      const segId = `tl-sem-${startDate || targetDateStr || 'day'}-${seg.startTime || idx}`;
+      segments.push({
+        id: segId,
+        date: startDate || endDate || targetDateStr || new Date().toISOString().slice(0, 10),
+        startTime: seg.startTime || '',
+        endTime: seg.endTime || '',
+        activityType: normType,
+        km,
+        coords: segCoords
+      });
+      allCoords.push(...segCoords);
+    }
+  });
+
+  // 2. Google Takeout Semantic Location History (`timelineObjects`)
+  if (Array.isArray(data.timelineObjects)) {
+    data.timelineObjects.forEach((obj, idx) => {
+      const act = obj?.activitySegment;
+      if (!act) return;
+
+      const startTs = act.duration?.startTimestamp || act.duration?.startTimestampMs;
+      const endTs = act.duration?.endTimestamp || act.duration?.endTimestampMs;
+      const startDate = normalizeIsoDate(startTs);
+      const endDate = normalizeIsoDate(endTs);
+      if (targetDateStr && startDate !== targetDateStr && endDate !== targetDateStr) {
+        return;
+      }
+
+      const rawType = act.activityType || act.activities?.[0]?.activityType || '';
+      const normType = String(rawType).toUpperCase().trim();
+      if (!WALKING_ACTIVITY_NAMES.has(normType)) return;
+
+      const segCoords = [];
+      if (act.startLocation?.latitudeE7 !== undefined && act.startLocation?.longitudeE7 !== undefined) {
+        segCoords.push([act.startLocation.latitudeE7 / 1e7, act.startLocation.longitudeE7 / 1e7]);
+      }
+      const waypoints = act.waypointPath?.waypoints || act.simplifiedRawPath?.points || [];
+      waypoints.forEach((wp) => {
+        const lat = wp.latE7 !== undefined ? wp.latE7 / 1e7 : wp.latitudeE7 !== undefined ? wp.latitudeE7 / 1e7 : null;
+        const lng = wp.lngE7 !== undefined ? wp.lngE7 / 1e7 : wp.longitudeE7 !== undefined ? wp.longitudeE7 / 1e7 : null;
+        if (lat !== null && lng !== null) {
+          segCoords.push([lat, lng]);
+        }
+      });
+      if (act.endLocation?.latitudeE7 !== undefined && act.endLocation?.longitudeE7 !== undefined) {
+        segCoords.push([act.endLocation.latitudeE7 / 1e7, act.endLocation.longitudeE7 / 1e7]);
+      }
+
+      let distMeters = Number(act.distance ?? act.waypointPath?.distanceMeters ?? 0);
+      if ((!distMeters || distMeters <= 0) && segCoords.length >= 2) {
+        let pathKm = 0;
+        for (let i = 1; i < segCoords.length; i++) {
+          pathKm += haversineKm(segCoords[i - 1], segCoords[i]);
+        }
+        distMeters = pathKm * 1000;
+      }
+
+      const km = Math.round((distMeters / 1000) * 10000) / 10000;
+      if (km > 0) {
+        const segId = `tl-obj-${startDate || targetDateStr || 'day'}-${startTs || idx}`;
+        segments.push({
+          id: segId,
+          date: startDate || endDate || targetDateStr || new Date().toISOString().slice(0, 10),
+          startTime: String(startTs || ''),
+          endTime: String(endTs || ''),
+          activityType: normType,
+          km,
+          coords: segCoords
+        });
+        allCoords.push(...segCoords);
+      }
+    });
+  }
+
+  const totalKm = Math.round(segments.reduce((acc, s) => acc + s.km, 0) * 10000) / 10000;
+  return {
+    date: targetDateStr || segments[0]?.date || new Date().toISOString().slice(0, 10),
+    segments,
+    totalKm,
+    allCoords
+  };
+}
+
+/**
+ * Imports walking travel for the target day from Google Maps Timeline data into the Fellowship Quest log,
+ * deduplicating segments so previously synced walks are never double-counted.
+ */
+function importTimelineWalksToQuest(timelineInput, targetDateStr) {
   const feedback = document.getElementById('gmaps-parse-feedback');
-  feedback.classList.remove('hidden');
+  if (feedback) feedback.classList.remove('hidden');
+
+  const dateToQuery =
+    targetDateStr ||
+    document.getElementById('input-timeline-date')?.value ||
+    new Date().toISOString().slice(0, 10);
+
+  let extracted;
+  try {
+    extracted = extractTimelineWalksForDate(timelineInput, dateToQuery);
+  } catch (err) {
+    if (feedback) {
+      feedback.textContent = 'Could not parse Google Maps Timeline JSON. Please check the file or snippet.';
+    }
+    return { addedKm: 0, segmentsCount: 0, skippedCount: 0, totalKmFound: 0 };
+  }
+
+  if (!Array.isArray(state.syncedTimelineIds)) {
+    state.syncedTimelineIds = [];
+  }
+  const syncedSet = new Set(state.syncedTimelineIds);
+  const newSegments = extracted.segments.filter((s) => !syncedSet.has(s.id));
+  const skippedCount = extracted.segments.length - newSegments.length;
+  const addedKm = Math.round(newSegments.reduce((acc, s) => acc + s.km, 0) * 10000) / 10000;
+
+  if (extracted.allCoords.length >= 2) {
+    clearPlottedRoute();
+    extracted.allCoords.forEach((pt) => addRoutePoint(pt));
+    if (realMap) {
+      realMap.fitBounds(plottedCoords, { padding: [30, 30] });
+    }
+  }
+
+  if (addedKm > 0) {
+    newSegments.forEach((s) => state.syncedTimelineIds.push(s.id));
+    const note = `Google Maps Timeline (${newSegments.length} walk${newSegments.length > 1 ? 's' : ''})`;
+    addWalkLog(addedKm, dateToQuery, note);
+    if (feedback) {
+      feedback.textContent = `✓ Added ${formatDist(addedKm, 2)} from ${newSegments.length} Google Maps Timeline walk${newSegments.length > 1 ? 's' : ''} on ${dateToQuery} to your Fellowship Quest!`;
+    }
+  } else if (skippedCount > 0) {
+    if (feedback) {
+      feedback.textContent = `All ${skippedCount} Google Maps Timeline walk(s) for ${dateToQuery} (${formatDist(extracted.totalKm, 2)}) are already in your Fellowship log.`;
+    }
+  } else {
+    if (feedback) {
+      feedback.textContent = `No walking segments found in Google Maps Timeline for ${dateToQuery}.`;
+    }
+  }
+
+  return {
+    addedKm,
+    segmentsCount: newSegments.length,
+    skippedCount,
+    totalKmFound: extracted.totalKm
+  };
+}
+
+/**
+ * Polls Google Fitness REST API (`dataset:aggregate`) for all walking segments on `targetDateStr`
+ * and adds un-synced walks directly to the Fellowship Quest log.
+ */
+async function pollGoogleDailyWalks({ accessToken, targetDateStr, fetchImpl } = {}) {
+  const feedback = document.getElementById('gmaps-parse-feedback');
+  if (feedback) feedback.classList.remove('hidden');
+
+  const token = (
+    accessToken ||
+    document.getElementById('input-google-client-id')?.value ||
+    state.googleAuthToken ||
+    ''
+  ).trim();
+
+  const dateStr =
+    targetDateStr ||
+    document.getElementById('input-timeline-date')?.value ||
+    new Date().toISOString().slice(0, 10);
+
+  if (!token) {
+    if (feedback) {
+      feedback.textContent =
+        'Enter a Google OAuth 2.0 Access Token above to poll Google Cloud directly, or tap "📂 Import Timeline.json" to import your on-device Google Maps Timeline.';
+    }
+    return { addedKm: 0, segmentsCount: 0, skippedCount: 0 };
+  }
+
+  state.googleAuthToken = token;
+  saveState();
+
+  const startMillis = Date.parse(`${dateStr}T00:00:00.000Z`);
+  const endMillis = Date.parse(`${dateStr}T23:59:59.999Z`);
+  const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
+
+  if (!doFetch) {
+    throw new Error('Fetch API is not available in this environment.');
+  }
+
+  if (feedback) {
+    feedback.textContent = `🔄 Polling Google Timeline / Fitness activity for ${dateStr}...`;
+  }
+
+  const response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      aggregateBy: [
+        { dataTypeName: 'com.google.distance.delta' },
+        { dataTypeName: 'com.google.step_count.delta' }
+      ],
+      bucketByActivitySegment: {
+        minDurationMillis: 60000
+      },
+      startTimeMillis: startMillis,
+      endTimeMillis: endMillis
+    })
+  });
+
+  if (!response.ok) {
+    const errText = `Google API returned HTTP ${response.status}. Verify your OAuth token has fitness.location.read / fitness.activity.read scope, or use Timeline.json import.`;
+    if (feedback) feedback.textContent = errText;
+    return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: errText };
+  }
+
+  const payload = await response.json();
+  const buckets = Array.isArray(payload?.bucket) ? payload.bucket : [];
+
+  if (!Array.isArray(state.syncedTimelineIds)) {
+    state.syncedTimelineIds = [];
+  }
+  const syncedSet = new Set(state.syncedTimelineIds);
+
+  let addedKm = 0;
+  let segmentsCount = 0;
+  let skippedCount = 0;
+
+  buckets.forEach((b, idx) => {
+    const activityCode = Number(b.activity);
+    // Keep only Walking / On-Foot / Hiking activity buckets
+    if (!WALKING_FIT_ACTIVITY_CODES.has(activityCode)) return;
+
+    let distMeters = 0;
+    let steps = 0;
+    (b.dataset || []).forEach((ds) => {
+      (ds.point || []).forEach((pt) => {
+        (pt.value || []).forEach((v) => {
+          if (typeof v.fpVal === 'number') distMeters += v.fpVal;
+          if (typeof v.intVal === 'number') steps += v.intVal;
+        });
+      });
+    });
+
+    const kmFromDist = distMeters / 1000;
+    const kmFromSteps = steps / state.stepsPerKm;
+    const segKm = Math.round(Math.max(kmFromDist, kmFromSteps) * 10000) / 10000;
+    if (segKm <= 0) return;
+
+    const segId = `gfit-${dateStr}-${b.startTimeMillis || idx}`;
+    if (syncedSet.has(segId)) {
+      skippedCount += 1;
+      return;
+    }
+
+    syncedSet.add(segId);
+    state.syncedTimelineIds.push(segId);
+    addedKm = Math.round((addedKm + segKm) * 10000) / 10000;
+    segmentsCount += 1;
+  });
+
+  if (addedKm > 0) {
+    const note = `Google Timeline Poll (${segmentsCount} walk${segmentsCount > 1 ? 's' : ''})`;
+    addWalkLog(addedKm, dateStr, note);
+    if (feedback) {
+      feedback.textContent = `✓ Polled and added ${formatDist(addedKm, 2)} (${segmentsCount} walk${segmentsCount > 1 ? 's' : ''}) for ${dateStr} to your Fellowship Quest!`;
+    }
+  } else if (skippedCount > 0) {
+    if (feedback) {
+      feedback.textContent = `All ${skippedCount} polled walk(s) for ${dateStr} are already in your Fellowship log.`;
+    }
+  } else {
+    if (feedback) {
+      feedback.textContent = `No new walking travel found for ${dateStr}.`;
+    }
+  }
+
+  return { addedKm, segmentsCount, skippedCount };
+}
+
+// Parse a pasted Google Maps Timeline JSON snippet or Google Maps URL
+function parseGoogleMapsUrl(urlStr, targetDateStr) {
+  const feedback = document.getElementById('gmaps-parse-feedback');
+  if (feedback) feedback.classList.remove('hidden');
+
+  const trimmed = String(urlStr || '').trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    return importTimelineWalksToQuest(trimmed, targetDateStr);
+  }
 
   const coordsFound = [];
   const dirRegex = /(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/g;
   let match;
-  while ((match = dirRegex.exec(urlStr)) !== null) {
+  while ((match = dirRegex.exec(trimmed)) !== null) {
     const lat = parseFloat(match[1]);
     const lng = parseFloat(match[2]);
     if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
@@ -596,15 +977,17 @@ function parseGoogleMapsUrl(urlStr) {
   }
 
   if (coordsFound.length >= 2) {
-    document.querySelector('[data-walk-mode="gps"]').click();
+    document.querySelector('[data-walk-mode="gps"]')?.click();
     clearPlottedRoute();
     coordsFound.forEach((pt) => addRoutePoint(pt));
     realMap.fitBounds(plottedCoords, { padding: [30, 30] });
     const dist = getPlottedKm();
-    feedback.textContent = `✓ Extracted ${coordsFound.length} Google Maps waypoints (${formatDist(dist, 2)})!`;
-  } else {
+    if (feedback) {
+      feedback.textContent = `✓ Extracted ${coordsFound.length} Google Maps waypoints (${formatDist(dist, 2)})!`;
+    }
+  } else if (feedback) {
     feedback.textContent =
-      'Tip: Copy the full URL from Google Maps with coordinates (e.g. google.com/maps/dir/51.75,-1.25/51.76,-1.24) or tap points directly on the Live Map tab.';
+      'Tip: Import your Timeline.json file above, paste a Timeline JSON snippet, or paste a Google Maps URL with coordinates.';
   }
 }
 
@@ -1038,11 +1421,36 @@ function setupEventListeners() {
     addWalkLog(km, dateVal, noteVal);
   });
 
-  // Google Maps Sync & API Key
+  // Google Maps Timeline Daily Walk Sync & API Key
+  const timelineDateEl = document.getElementById('input-timeline-date');
+  if (timelineDateEl) {
+    timelineDateEl.value = new Date().toISOString().slice(0, 10);
+  }
+  const googleClientInput = document.getElementById('input-google-client-id');
+  if (googleClientInput && state.googleAuthToken) {
+    googleClientInput.value = state.googleAuthToken;
+  }
+
+  document.getElementById('btn-poll-google-timeline')?.addEventListener('click', () => {
+    pollGoogleDailyWalks();
+  });
+
+  document.getElementById('input-timeline-file')?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const targetDate = document.getElementById('input-timeline-date')?.value || new Date().toISOString().slice(0, 10);
+      importTimelineWalksToQuest(String(reader.result || ''), targetDate);
+    };
+    reader.readAsText(file);
+  });
+
   document.getElementById('btn-launch-gmaps-directions').addEventListener('click', openInNativeGoogleMaps);
   document.getElementById('btn-parse-gmaps-url').addEventListener('click', () => {
     const val = document.getElementById('input-gmaps-url').value.trim();
-    parseGoogleMapsUrl(val);
+    const targetDate = document.getElementById('input-timeline-date')?.value;
+    parseGoogleMapsUrl(val, targetDate);
   });
 
   document.getElementById('btn-save-gmaps-key').addEventListener('click', () => {
@@ -1138,6 +1546,7 @@ function setupEventListeners() {
   document.getElementById('btn-reset-demo').addEventListener('click', () => {
     if (confirm('Reset all recorded walks back to Bag End (0 km)?')) {
       state.logs = [];
+      state.syncedTimelineIds = [];
       saveState();
       renderAllViews(true);
     }
@@ -1220,6 +1629,9 @@ export {
   getPlottedKm,
   addRoutePoint,
   clearPlottedRoute,
+  extractTimelineWalksForDate,
+  importTimelineWalksToQuest,
+  pollGoogleDailyWalks,
   parseGoogleMapsUrl,
   addWalkLog,
   renderMiddleEarthProgress,
@@ -1230,4 +1642,5 @@ export {
   switchTab,
   initApp
 };
+
 
