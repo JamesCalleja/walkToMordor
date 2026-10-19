@@ -32,11 +32,14 @@ jobs:
       - name: Execute Test Suite Gate
         run: npm test
 
-      - name: Inject Google Maps API Key from GitHub Secret
+      - name: Inject Google API Keys from GitHub Secrets
         env:
           GMAPS_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          GCLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
         run: |
-          printf "export const DEFAULT_GMAPS_API_KEY = %s;\n" "$(jq -Rn 'env.GMAPS_KEY // ""')" > ./public/config.js
+          printf "export const DEFAULT_GMAPS_API_KEY = %s;\nexport const DEFAULT_GOOGLE_CLIENT_ID = %s;\n" \
+            "$(jq -Rn 'env.GMAPS_KEY // ""')" \
+            "$(jq -Rn 'env.GCLIENT_ID // ""')" > ./public/config.js
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
