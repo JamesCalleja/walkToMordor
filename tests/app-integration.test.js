@@ -40,7 +40,9 @@ function setupDomAndMocks() {
       id,
       textContent: '',
       value: attrs.value ?? '',
-      step: attrs.step ?? '',
+      step: id === 'input-walk-amount' ? '0.01' : (attrs.step ?? ''),
+      min: id === 'input-walk-amount' ? '0.01' : (attrs.min ?? ''),
+      max: id === 'input-walk-amount' ? '1000' : (attrs.max ?? ''),
       placeholder: attrs.placeholder ?? '',
       disabled: false,
       style: {
@@ -468,6 +470,57 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     const expectedKm = Math.round((10000 / 1312) * 100) / 100;
     assert.equal(getTotalKmWalked(), expectedKm);
     assert.equal(state.logs.length, 1);
+  });
+
+  it('Regression #10: Pedometer Step Count updates min=1, max=30000, step=1 so integers 1..30000 pass HTML5 validation and log cleanly', () => {
+    switchTab('tab-walk');
+    document.querySelector('[data-walk-mode="manual"]').click();
+
+    const amountInput = env.elementsById.get('input-walk-amount');
+    // Initially in Kilometers mode
+    assert.equal(amountInput.min, '0.01');
+    assert.equal(amountInput.max, '1000');
+    assert.equal(amountInput.step, '0.01');
+
+    // Switch to Pedometer Step Count mode
+    document.querySelector('[data-entry-type="steps"]').click();
+    assert.equal(amountInput.min, '1');
+    assert.equal(amountInput.max, '30000');
+    assert.equal(amountInput.step, '1');
+
+    // Verify HTML5 number input step/range constraints for standard integer step counts (1, 500, 8500, 30000)
+    for (const testSteps of [1, 500, 8500, 30000]) {
+      const minNum = Number(amountInput.min);
+      const maxNum = Number(amountInput.max);
+      const stepNum = Number(amountInput.step);
+      assert.ok(testSteps >= minNum && testSteps <= maxNum, `${testSteps} should be within [${minNum}, ${maxNum}]`);
+      assert.equal((testSteps - minNum) % stepNum, 0, `${testSteps} should not trigger HTML5 stepMismatch`);
+    }
+
+    // Verify logging 1 step (minimum boundary) records a positive distance
+    amountInput.value = '1';
+    env.elementsById.get('form-manual-walk').dispatchEvent({
+      type: 'submit',
+      preventDefault: () => {}
+    });
+    assert.equal(state.logs.length, 1);
+    assert.ok(getTotalKmWalked() > 0);
+
+    // Verify logging 30,000 steps (maximum boundary) records ~22.87 km
+    switchTab('tab-walk');
+    amountInput.value = '30000';
+    env.elementsById.get('form-manual-walk').dispatchEvent({
+      type: 'submit',
+      preventDefault: () => {}
+    });
+    assert.equal(state.logs.length, 2);
+    assert.ok(getTotalKmWalked() > 22.8);
+
+    // Switching back to Kilometers mode restores km constraints
+    document.querySelector('[data-entry-type="km"]').click();
+    assert.equal(amountInput.min, '0.01');
+    assert.equal(amountInput.max, '1000');
+    assert.equal(amountInput.step, '0.01');
   });
 
   it('triggers the Milestone Unlocked modal when a logged walk crosses a new waypoint', () => {

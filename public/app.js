@@ -40,7 +40,7 @@ function saveState() {
 // Compute total kilometers walked from logs
 function getTotalKmWalked() {
   const sum = state.logs.reduce((acc, item) => acc + (Number(item.km) || 0), 0);
-  return Math.max(0, Math.round(sum * 100) / 100);
+  return Math.max(0, Math.round(sum * 10000) / 10000);
 }
 
 // Format distance in kilometers
@@ -701,7 +701,9 @@ function addWalkLog(kmToAdd, dateStr, noteStr) {
   const prevKm = getTotalKmWalked();
   const prevProg = getQuestProgressData(prevKm);
 
-  const cleanKm = Math.round(Number(kmToAdd) * 100) / 100;
+  const rawKm = Number(kmToAdd);
+  if (!rawKm || rawKm <= 0) return;
+  const cleanKm = rawKm >= 0.01 ? Math.round(rawKm * 100) / 100 : Math.round(rawKm * 10000) / 10000;
   if (!cleanKm || cleanKm <= 0) return;
 
   state.logs.unshift({
@@ -991,10 +993,14 @@ function setupEventListeners() {
       if (activeEntryType === 'km') {
         amountLabel.textContent = 'Distance Walked (Kilometers)';
         amountInput.step = '0.01';
+        amountInput.min = '0.01';
+        amountInput.max = '1000';
         amountInput.placeholder = 'e.g. 5.0';
       } else {
         amountLabel.textContent = 'Pedometer Step Count';
         amountInput.step = '1';
+        amountInput.min = '1';
+        amountInput.max = '30000';
         amountInput.placeholder = 'e.g. 8500';
       }
       updateConversionPreview();
