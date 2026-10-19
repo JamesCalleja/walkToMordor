@@ -1,5 +1,5 @@
 import { MILESTONES, LANDMARKS, TOTAL_KM, DEFAULT_REAL_WORLD_START } from './data/milestones.js';
-import { DEFAULT_GMAPS_API_KEY } from './config.js';
+import { DEFAULT_GMAPS_API_KEY, DEFAULT_GOOGLE_CLIENT_ID } from './config.js';
 
 const STORAGE_KEY = 'walk_to_mordor_metric_v2';
 
@@ -7,7 +7,9 @@ const STORAGE_KEY = 'walk_to_mordor_metric_v2';
 let state = {
   stepsPerKm: 1312,
   gmapsApiKey: DEFAULT_GMAPS_API_KEY || '',
+  googleClientId: DEFAULT_GOOGLE_CLIENT_ID || '',
   googleAuthToken: '',
+  googleTokenExpiry: 0,
   customWallpaper: '',
   syncedTimelineIds: [],
   logs: []
@@ -27,6 +29,9 @@ function loadState() {
       }
       if (!state.gmapsApiKey && DEFAULT_GMAPS_API_KEY) {
         state.gmapsApiKey = DEFAULT_GMAPS_API_KEY;
+      }
+      if (!state.googleClientId && DEFAULT_GOOGLE_CLIENT_ID) {
+        state.googleClientId = DEFAULT_GOOGLE_CLIENT_ID;
       }
     }
   } catch (err) {
@@ -823,30 +828,76 @@ function importTimelineWalksToQuest(timelineInput, targetDateStr) {
   };
 }
 
+const GOOGLE_FITNESS_SCOPES =
+  'https://www.googleapis.com/auth/fitness.activity.read https://www.googleapis.com/auth/fitness.location.read';
+
+/**
+ * Triggers the standard "Sign in with Google" OAuth 2.0 popup using the app's
+ * configured GOOGLE_CLIENT_ID so end users never have to create keys or tokens.
+ */
+function requestGoogleAccessToken(clientId) {
+  return new Promise((resolve, reject) => {
+    if (!window.google?.accounts?.oauth2) {
+      reject(new Error('Google Sign-In service is still loading. Please try again in a moment.'));
+      return;
+    }
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: GOOGLE_FITNESS_SCOPES,
+      callback: (resp) => {
+        if (resp.error || !resp.access_token) {
+          reject(new Error(resp.error_description || resp.error || 'Google Sign-In was cancelled.'));
+          return;
+        }
+        const expiresInSec = Number(resp.expires_in) || 3500;
+        state.googleAuthToken = resp.access_token;
+        state.googleTokenExpiry = Date.now() + expiresInSec * 1000;
+        saveState();
+        resolve(resp.access_token);
+      }
+    });
+    tokenClient.requestAccessToken({ prompt: '' });
+  });
+}
+
 /**
  * Polls Google Fitness REST API (`dataset:aggregate`) for all walking segments on `targetDateStr`
  * and adds un-synced walks directly to the Fellowship Quest log.
  */
-async function pollGoogleDailyWalks({ accessToken, targetDateStr, fetchImpl } = {}) {
+async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetchImpl } = {}) {
   const feedback = document.getElementById('gmaps-parse-feedback');
   if (feedback) feedback.classList.remove('hidden');
-
-  const token = (
-    accessToken ||
-    document.getElementById('input-google-client-id')?.value ||
-    state.googleAuthToken ||
-    ''
-  ).trim();
 
   const dateStr =
     targetDateStr ||
     document.getElementById('input-timeline-date')?.value ||
     new Date().toISOString().slice(0, 10);
 
+  let token = (accessToken || '').trim();
+  if (!token && state.googleAuthToken && (!state.googleTokenExpiry || Date.now() < state.googleTokenExpiry)) {
+    token = state.googleAuthToken.trim();
+  }
+
+  const effectiveClientId = (clientId || state.googleClientId || DEFAULT_GOOGLE_CLIENT_ID || '').trim();
+
+  if (!token && effectiveClientId) {
+    try {
+      if (feedback) {
+        feedback.textContent = 'Opening Google Sign-In to sync your daily walks...';
+      }
+      token = await requestGoogleAccessToken(effectiveClientId);
+    } catch (err) {
+      if (feedback) {
+        feedback.textContent = err.message || 'Could not complete Google Sign-In.';
+      }
+      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message };
+    }
+  }
+
   if (!token) {
     if (feedback) {
       feedback.textContent =
-        'Enter a Google OAuth 2.0 Access Token above to poll Google Cloud directly, or tap "📂 Import Timeline.json" to import your on-device Google Maps Timeline.';
+        'Google Sign-In is not configured yet (set GOOGLE_CLIENT_ID in GitHub Secrets).';
     }
     return { addedKm: 0, segmentsCount: 0, skippedCount: 0 };
   }
@@ -863,10 +914,10 @@ async function pollGoogleDailyWalks({ accessToken, targetDateStr, fetchImpl } = 
   }
 
   if (feedback) {
-    feedback.textContent = `🔄 Polling Google Timeline / Fitness activity for ${dateStr}...`;
+    feedback.textContent = `🔄 Syncing your walking travel for ${dateStr}...`;
   }
 
-  const response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
+  let response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -885,8 +936,39 @@ async function pollGoogleDailyWalks({ accessToken, targetDateStr, fetchImpl } = 
     })
   });
 
+  // If cached token expired (HTTP 401) and we have an app Client ID, refresh via Google Sign-In once
+  if (response.status === 401 && !accessToken && effectiveClientId && window.google?.accounts?.oauth2) {
+    state.googleAuthToken = '';
+    state.googleTokenExpiry = 0;
+    saveState();
+    try {
+      token = await requestGoogleAccessToken(effectiveClientId);
+      response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          aggregateBy: [
+            { dataTypeName: 'com.google.distance.delta' },
+            { dataTypeName: 'com.google.step_count.delta' }
+          ],
+          bucketByActivitySegment: {
+            minDurationMillis: 60000
+          },
+          startTimeMillis: startMillis,
+          endTimeMillis: endMillis
+        })
+      });
+    } catch (err) {
+      if (feedback) feedback.textContent = err.message;
+      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message };
+    }
+  }
+
   if (!response.ok) {
-    const errText = `Google API returned HTTP ${response.status}. Verify your OAuth token has fitness.location.read / fitness.activity.read scope, or use Timeline.json import.`;
+    const errText = `Google API returned HTTP ${response.status}. Please sign in again to sync your walks.`;
     if (feedback) feedback.textContent = errText;
     return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: errText };
   }

@@ -714,5 +714,57 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.equal(poll2.skippedCount, 2);
     assert.equal(getTotalKmWalked(), 6);
   });
+
+  it('Issue #7: automatically triggers 1-tap Google Sign-In via app GOOGLE_CLIENT_ID without requiring end-user token setup', async () => {
+    state.googleAuthToken = '';
+    state.googleTokenExpiry = 0;
+
+    // Simulate Google Identity Services (`window.google.accounts.oauth2.initTokenClient`)
+    let requestedClientId = null;
+    globalThis.window.google = {
+      accounts: {
+        oauth2: {
+          initTokenClient: (cfg) => {
+            requestedClientId = cfg.client_id;
+            return {
+              requestAccessToken: () => {
+                cfg.callback({ access_token: 'ya29.auto-popup-token', expires_in: 3600 });
+              }
+            };
+          }
+        }
+      }
+    };
+
+    const mockFetch = async (_url, opts) => {
+      assert.equal(opts.headers.Authorization, 'Bearer ya29.auto-popup-token');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          bucket: [
+            {
+              startTimeMillis: '1792450000000',
+              endTimeMillis: '1792453600000',
+              activity: 7,
+              dataset: [{ point: [{ value: [{ fpVal: 4200 }] }] }]
+            }
+          ]
+        })
+      };
+    };
+
+    const res = await pollGoogleDailyWalks({
+      clientId: '123456789-fellowship.apps.googleusercontent.com',
+      targetDateStr: '2026-10-19',
+      fetchImpl: mockFetch
+    });
+
+    assert.equal(requestedClientId, '123456789-fellowship.apps.googleusercontent.com');
+    assert.equal(res.addedKm, 4.2);
+    assert.equal(res.segmentsCount, 1);
+    assert.equal(getTotalKmWalked(), 4.2);
+  });
 });
+
 
