@@ -1,11 +1,12 @@
 import { MILESTONES, LANDMARKS, TOTAL_KM, DEFAULT_REAL_WORLD_START } from './data/milestones.js';
+import { DEFAULT_GMAPS_API_KEY } from './config.js';
 
 const STORAGE_KEY = 'walk_to_mordor_metric_v2';
 
 // Application State (Pure Metric: Kilometers & Steps/km)
 let state = {
   stepsPerKm: 1312,
-  gmapsApiKey: '',
+  gmapsApiKey: DEFAULT_GMAPS_API_KEY || '',
   customWallpaper: '',
   logs: []
 };
@@ -19,6 +20,9 @@ function loadState() {
         parsed.logs = parsed.logs.filter((item) => item.id !== 'starter-1');
       }
       state = { ...state, ...parsed };
+      if (!state.gmapsApiKey && DEFAULT_GMAPS_API_KEY) {
+        state.gmapsApiKey = DEFAULT_GMAPS_API_KEY;
+      }
     }
   } catch (err) {
     console.warn('Could not load saved state:', err);
@@ -598,7 +602,7 @@ function activateNativeGoogleMapsEngine(apiKey) {
       east: 889 * 0.02
     };
 
-    new window.google.maps.GroundOverlay('/assets/middle-earth-map.jpg', imageBounds).setMap(gmapsMeInstance);
+    new window.google.maps.GroundOverlay('./assets/middle-earth-map.jpg', imageBounds).setMap(gmapsMeInstance);
     updateNativeGoogleMapOverlay(getQuestProgressData(getTotalKmWalked()));
   };
 

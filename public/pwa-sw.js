@@ -1,8 +1,9 @@
-const CACHE_NAME = 'walk-to-mordor-pwa-v2';
+const CACHE_NAME = 'walk-to-mordor-pwa-v3';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
+  './config.js',
   './app.js',
   './data/milestones.js',
   './assets/middle-earth-map.jpg',

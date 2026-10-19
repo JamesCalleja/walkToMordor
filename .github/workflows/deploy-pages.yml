@@ -24,6 +24,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Inject Google Maps API Key from GitHub Secret
+        env:
+          GMAPS_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          printf "export const DEFAULT_GMAPS_API_KEY = %s;\n" "$(jq -Rn 'env.GMAPS_KEY // ""')" > ./public/config.js
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
