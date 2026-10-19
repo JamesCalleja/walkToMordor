@@ -695,6 +695,8 @@ function updateNativeGoogleMapOverlay(prog) {
 // ============================================================================
 // 3. LOGGING WALKS, CELEBRATING MILESTONES, TIMELINE & JOURNAL (METRIC)
 // ============================================================================
+let walkIdSeq = 0;
+
 function addWalkLog(kmToAdd, dateStr, noteStr) {
   const prevKm = getTotalKmWalked();
   const prevProg = getQuestProgressData(prevKm);
@@ -703,7 +705,7 @@ function addWalkLog(kmToAdd, dateStr, noteStr) {
   if (!cleanKm || cleanKm <= 0) return;
 
   state.logs.unshift({
-    id: `walk-${Date.now()}`,
+    id: `walk-${Date.now()}-${++walkIdSeq}`,
     date: dateStr || new Date().toISOString().slice(0, 10),
     km: cleanKm,
     note: noteStr || 'Walk toward Mordor'
