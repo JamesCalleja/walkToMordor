@@ -227,6 +227,10 @@ function setupDomAndMocks() {
     'btn-launch-gmaps-directions',
     'btn-parse-gmaps-url',
     'gmaps-parse-feedback',
+    'gmaps-debug-panel',
+    'gmaps-debug-output',
+    'btn-reauth-google',
+    'btn-copy-debug-log',
     'input-gmaps-api-key',
     'btn-save-gmaps-key',
     'btn-clear-gmaps-key',
@@ -953,6 +957,8 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.equal(poll1.addedKm, 1);
     assert.equal(poll1.segmentsCount, 1);
     assert.equal(getTotalKmWalked(), 1);
+    assert.ok(Array.isArray(poll1.debugLog) && poll1.debugLog.length > 0, 'Populates diagnostic debug log');
+    assert.match(env.elementsById.get('gmaps-debug-output').textContent, /Starting Google Walk Sync/);
 
     // Polling again with the same 1 km daily total skips duplicate logging
     const poll2 = await pollGoogleDailyWalks({
