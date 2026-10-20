@@ -1,5 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   STORAGE_KEY,
   state,
@@ -873,6 +875,21 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.match(latestTileLayer.url, /key=AIzaSyUpdatedKey456/);
     assert.ok(env.elementsById.get('walk-mode-gps').classList.contains('active'), 'Switches to Live GPS & Map view');
     assert.ok(!env.elementsById.get('middle-earth-map').classList.contains('hidden'), 'Keeps Middle-earth map intact');
+  });
+
+  it('Issue #6: Journal backdrop wallpaper settings row and button group are responsive and horizontally scrollable within container margins', () => {
+    const cssPath = fileURLToPath(new URL('../public/styles.css', import.meta.url));
+    const css = fs.readFileSync(cssPath, 'utf8');
+
+    const settingItemMatch = css.match(/\.setting-item\s*\{([^}]+)\}/);
+    assert.ok(settingItemMatch, '.setting-item rule must exist in styles.css');
+    assert.match(settingItemMatch[1], /flex-wrap:\s*wrap/, '.setting-item must wrap dynamically');
+    assert.match(settingItemMatch[1], /max-width:\s*100%/, '.setting-item must constrain width to 100%');
+
+    const btnGroupMatch = css.match(/\.setting-btn-group\s*\{([^}]+)\}/);
+    assert.ok(btnGroupMatch, '.setting-btn-group rule must exist in styles.css');
+    assert.match(btnGroupMatch[1], /overflow-x:\s*auto/, '.setting-btn-group must scroll horizontally when needed');
+    assert.match(btnGroupMatch[1], /max-width:\s*100%/, '.setting-btn-group must never exceed parent container width');
   });
 });
 
