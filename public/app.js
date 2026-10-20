@@ -12,6 +12,7 @@ let state = {
   googleTokenExpiry: 0,
   customWallpaper: '',
   syncedTimelineIds: [],
+  syncedDailyTotals: {},
   logs: []
 };
 
@@ -26,6 +27,9 @@ function loadState() {
       state = { ...state, ...parsed };
       if (!Array.isArray(state.syncedTimelineIds)) {
         state.syncedTimelineIds = [];
+      }
+      if (!state.syncedDailyTotals || typeof state.syncedDailyTotals !== 'object') {
+        state.syncedDailyTotals = {};
       }
       if (!state.gmapsApiKey && DEFAULT_GMAPS_API_KEY) {
         state.gmapsApiKey = DEFAULT_GMAPS_API_KEY;
@@ -619,9 +623,11 @@ function openInNativeGoogleMaps() {
   }
 }
 
-const WALKING_ACTIVITY_NAMES = new Set(['WALKING', 'ON_FOOT', 'HIKING', 'WALK']);
-// Google Fit activity codes: 7 = Walking, 93 = Walking (fitness), 35 = Hiking
-const WALKING_FIT_ACTIVITY_CODES = new Set([7, 93, 35]);
+const WALKING_ACTIVITY_NAMES = new Set(['WALKING', 'ON_FOOT', 'HIKING', 'WALK', 'RUNNING', 'JOGGING']);
+// Google Fit activity codes: 7 = Walking, 8 = Running, 35 = Hiking, 93..96/116 = Walking variants
+const WALKING_FIT_ACTIVITY_CODES = new Set([7, 8, 35, 93, 94, 95, 96, 116]);
+// Passive background step buckets on Android often use 4 (Unknown) or 108 (Other)
+const PASSIVE_STEP_FIT_ACTIVITY_CODES = new Set([4, 108]);
 
 function parseCoordPairString(str) {
   if (typeof str !== 'string') return null;
@@ -959,7 +965,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         { dataTypeName: 'com.google.step_count.delta' }
       ],
       bucketByActivitySegment: {
-        minDurationMillis: 60000
+        minDurationMillis: 1000
       },
       startTimeMillis: startMillis,
       endTimeMillis: endMillis
@@ -985,7 +991,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
             { dataTypeName: 'com.google.step_count.delta' }
           ],
           bucketByActivitySegment: {
-            minDurationMillis: 60000
+            minDurationMillis: 1000
           },
           startTimeMillis: startMillis,
           endTimeMillis: endMillis
@@ -1009,6 +1015,9 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
   if (!Array.isArray(state.syncedTimelineIds)) {
     state.syncedTimelineIds = [];
   }
+  if (!state.syncedDailyTotals || typeof state.syncedDailyTotals !== 'object') {
+    state.syncedDailyTotals = {};
+  }
   const syncedSet = new Set(state.syncedTimelineIds);
 
   let addedKm = 0;
@@ -1016,10 +1025,6 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
   let skippedCount = 0;
 
   buckets.forEach((b, idx) => {
-    const activityCode = Number(b.activity);
-    // Keep only Walking / On-Foot / Hiking activity buckets
-    if (!WALKING_FIT_ACTIVITY_CODES.has(activityCode)) return;
-
     let distMeters = 0;
     let steps = 0;
     (b.dataset || []).forEach((ds) => {
@@ -1031,7 +1036,12 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
       });
     });
 
-    const kmFromDist = distMeters / 1000;
+    const activityCode = Number(b.activity);
+    const isExplicitWalk = WALKING_FIT_ACTIVITY_CODES.has(activityCode);
+    const isPassiveStepWalk = PASSIVE_STEP_FIT_ACTIVITY_CODES.has(activityCode) && steps > 0;
+    if (!isExplicitWalk && !isPassiveStepWalk) return;
+
+    const kmFromDist = isExplicitWalk ? distMeters / 1000 : 0;
     const kmFromSteps = steps / state.stepsPerKm;
     const segKm = Math.round(Math.max(kmFromDist, kmFromSteps) * 10000) / 10000;
     if (segKm <= 0) return;
@@ -1048,6 +1058,74 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     segmentsCount += 1;
   });
 
+  // Fallback: If no explicit activity segments were recorded (common on Android when passive step/distance
+  // tracking runs in the background without starting a workout session), query bucketByTime for the day!
+  if (addedKm === 0 && skippedCount === 0) {
+    try {
+      const timeResp = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          aggregateBy: [
+            { dataTypeName: 'com.google.step_count.delta' },
+            { dataTypeName: 'com.google.distance.delta' }
+          ],
+          bucketByTime: {
+            durationMillis: Math.max(1000, endMillis - startMillis)
+          },
+          startTimeMillis: startMillis,
+          endTimeMillis: endMillis
+        })
+      });
+
+      if (timeResp && timeResp.ok) {
+        const timePayload = await timeResp.json();
+        const timeBuckets = Array.isArray(timePayload?.bucket) ? timePayload.bucket : [];
+        let daySteps = 0;
+        let dayDistMeters = 0;
+        timeBuckets.forEach((tb) => {
+          (tb.dataset || []).forEach((ds) => {
+            (ds.point || []).forEach((pt) => {
+              (pt.value || []).forEach((v) => {
+                if (typeof v.intVal === 'number') daySteps += v.intVal;
+                if (typeof v.fpVal === 'number') dayDistMeters += v.fpVal;
+              });
+            });
+          });
+        });
+
+        const kmFromSteps = daySteps / state.stepsPerKm;
+        const kmFromDist = dayDistMeters / 1000;
+        // Prefer step-based km when steps exist so vehicle distance is never accidentally included;
+        // if distance is close to step distance (within 1.6x), allow whichever is higher.
+        let totalDayWalkKm = 0;
+        if (daySteps > 0) {
+          totalDayWalkKm = kmFromDist <= kmFromSteps * 1.6 ? Math.max(kmFromSteps, kmFromDist) : kmFromSteps;
+        } else if (kmFromDist > 0) {
+          totalDayWalkKm = kmFromDist;
+        }
+        totalDayWalkKm = Math.round(totalDayWalkKm * 10000) / 10000;
+
+        if (totalDayWalkKm > 0) {
+          const prevSyncedKm = Number(state.syncedDailyTotals[dateStr]) || 0;
+          const deltaKm = Math.round((totalDayWalkKm - prevSyncedKm) * 10000) / 10000;
+          if (deltaKm >= 0.01) {
+            state.syncedDailyTotals[dateStr] = totalDayWalkKm;
+            addedKm = deltaKm;
+            segmentsCount = 1;
+          } else if (prevSyncedKm > 0) {
+            skippedCount = 1;
+          }
+        }
+      }
+    } catch (_e) {
+      // Ignore fallback error and proceed with standard feedback
+    }
+  }
+
   if (addedKm > 0) {
     const note = `Google Timeline Poll (${segmentsCount} walk${segmentsCount > 1 ? 's' : ''})`;
     addWalkLog(addedKm, dateStr, note);
@@ -1060,7 +1138,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     }
   } else {
     if (feedback) {
-      feedback.textContent = `No new walking travel found for ${dateStr}.`;
+      feedback.textContent = `No new walking travel found in Google Cloud for ${dateStr}. Note: Android stores Google Maps Timeline on-device — ensure the Google Fit app is active on your phone for cloud sync, or tap "Import On-Device Timeline.json" above.`;
     }
   }
 
@@ -1578,9 +1656,9 @@ function setupEventListeners() {
     reader.readAsText(file);
   });
 
-  document.getElementById('btn-launch-gmaps-directions').addEventListener('click', openInNativeGoogleMaps);
-  document.getElementById('btn-parse-gmaps-url').addEventListener('click', () => {
-    const val = document.getElementById('input-gmaps-url').value.trim();
+  document.getElementById('btn-launch-gmaps-directions')?.addEventListener('click', openInNativeGoogleMaps);
+  document.getElementById('btn-parse-gmaps-url')?.addEventListener('click', () => {
+    const val = document.getElementById('input-gmaps-url')?.value.trim() || '';
     const targetDate = document.getElementById('input-timeline-date')?.value;
     parseGoogleMapsUrl(val, targetDate);
   });
@@ -1691,6 +1769,7 @@ function setupEventListeners() {
     if (confirm('Reset all recorded walks back to Bag End (0 km)?')) {
       state.logs = [];
       state.syncedTimelineIds = [];
+      state.syncedDailyTotals = {};
       saveState();
       renderAllViews(true);
     }

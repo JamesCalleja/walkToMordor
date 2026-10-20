@@ -400,6 +400,7 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     state.googleAuthToken = '';
     state.customWallpaper = '';
     state.syncedTimelineIds = [];
+    state.syncedDailyTotals = {};
     state.logs = [];
     initApp();
   });
@@ -890,6 +891,65 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.ok(btnGroupMatch, '.setting-btn-group rule must exist in styles.css');
     assert.match(btnGroupMatch[1], /overflow-x:\s*auto/, '.setting-btn-group must scroll horizontally when needed');
     assert.match(btnGroupMatch[1], /max-width:\s*100%/, '.setting-btn-group must never exceed parent container width');
+  });
+
+  it('Issue #7 Reopened: falls back to bucketByTime when bucketByActivitySegment is empty (passive 1 km morning walk) and removes Shared Google Maps Link UI', async () => {
+    // 1. Verify index.html no longer has "Import a Shared Google Maps Walking Link" or "Plot Shared Link"
+    const htmlPath = fileURLToPath(new URL('../public/index.html', import.meta.url));
+    const html = fs.readFileSync(htmlPath, 'utf8');
+    assert.doesNotMatch(html, /Import a Shared Google Maps Walking Link/i);
+    assert.doesNotMatch(html, /Plot Shared Link/i);
+    assert.match(html, /Import On-Device Timeline\.json/i);
+
+    // 2. Simulate passive morning walk where bucketByActivitySegment returns empty bucket: [],
+    // and bucketByTime returns 1,312 steps / 1,000 meters (1.0 km)
+    const mockFetch = async (_url, opts) => {
+      const reqBody = JSON.parse(opts.body);
+      if (reqBody.bucketByActivitySegment) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ bucket: [] })
+        };
+      }
+      if (reqBody.bucketByTime) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            bucket: [
+              {
+                dataset: [
+                  { point: [{ value: [{ intVal: 1312 }] }] },
+                  { point: [{ value: [{ fpVal: 1000 }] }] }
+                ]
+              }
+            ]
+          })
+        };
+      }
+      throw new Error('Unexpected aggregate request');
+    };
+
+    const poll1 = await pollGoogleDailyWalks({
+      accessToken: 'ya29.passive-morning-walk',
+      targetDateStr: '2026-10-20',
+      fetchImpl: mockFetch
+    });
+
+    assert.equal(poll1.addedKm, 1);
+    assert.equal(poll1.segmentsCount, 1);
+    assert.equal(getTotalKmWalked(), 1);
+
+    // Polling again with the same 1 km daily total skips duplicate logging
+    const poll2 = await pollGoogleDailyWalks({
+      accessToken: 'ya29.passive-morning-walk',
+      targetDateStr: '2026-10-20',
+      fetchImpl: mockFetch
+    });
+    assert.equal(poll2.addedKm, 0);
+    assert.equal(poll2.skippedCount, 1);
+    assert.equal(getTotalKmWalked(), 1);
   });
 });
 
