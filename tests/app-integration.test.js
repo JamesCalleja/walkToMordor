@@ -893,39 +893,52 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.match(btnGroupMatch[1], /max-width:\s*100%/, '.setting-btn-group must never exceed parent container width');
   });
 
-  it('Issue #7 Reopened: falls back to bucketByTime when bucketByActivitySegment is empty (passive 1 km morning walk) and removes Shared Google Maps Link UI', async () => {
-    // 1. Verify index.html no longer has "Import a Shared Google Maps Walking Link" or "Plot Shared Link"
+  it('Issue #7 Reopened: falls back to bucketByTime / individual streams / dataSources when bucketByActivitySegment is empty or 400, and removes Timeline.json & Shared Link UI', async () => {
+    // 1. Verify index.html no longer has "Import On-Device Timeline.json", "Import a Shared Google Maps Walking Link", or "Plot Shared Link"
     const htmlPath = fileURLToPath(new URL('../public/index.html', import.meta.url));
     const html = fs.readFileSync(htmlPath, 'utf8');
+    assert.doesNotMatch(html, /Import On-Device Timeline\.json/i);
     assert.doesNotMatch(html, /Import a Shared Google Maps Walking Link/i);
     assert.doesNotMatch(html, /Plot Shared Link/i);
-    assert.match(html, /Import On-Device Timeline\.json/i);
 
-    // 2. Simulate passive morning walk where bucketByActivitySegment returns empty bucket: [],
-    // and bucketByTime returns 1,312 steps / 1,000 meters (1.0 km)
+    // 2. Simulate passive morning walk where bucketByActivitySegment returns HTTP 400 (no default activity.segment stream)
+    // and combined bucketByTime returns HTTP 400 (no default distance.delta stream), while individual step_count.delta
+    // returns 1,312 steps (1.0 km)
     const mockFetch = async (_url, opts) => {
       const reqBody = JSON.parse(opts.body);
       if (reqBody.bucketByActivitySegment) {
         return {
-          ok: true,
-          status: 200,
-          json: async () => ({ bucket: [] })
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { message: 'No default datasource found' } })
         };
       }
-      if (reqBody.bucketByTime) {
+      if (reqBody.bucketByTime && reqBody.aggregateBy.length === 2) {
         return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            bucket: [
-              {
-                dataset: [
-                  { point: [{ value: [{ intVal: 1312 }] }] },
-                  { point: [{ value: [{ fpVal: 1000 }] }] }
-                ]
-              }
-            ]
-          })
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { message: 'No default datasource found for com.google.distance.delta' } })
+        };
+      }
+      if (reqBody.bucketByTime && reqBody.aggregateBy.length === 1) {
+        const item = reqBody.aggregateBy[0];
+        if (item.dataSourceId?.includes('estimated_steps') || item.dataTypeName === 'com.google.step_count.delta') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              bucket: [
+                {
+                  dataset: [{ point: [{ value: [{ intVal: 1312 }] }] }]
+                }
+              ]
+            })
+          };
+        }
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({})
         };
       }
       throw new Error('Unexpected aggregate request');
