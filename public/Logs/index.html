@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Walk to Mordor — Remote Client Diagnostic Logs</title>
+  <link rel="stylesheet" href="../styles.css" />
+  <style>
+    body {
+      padding: 20px;
+      overflow: auto;
+      height: auto;
+      min-height: 100vh;
+    }
+    .logs-container {
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    .log-entry-card {
+      background: rgba(20, 14, 10, 0.92);
+      border: 1px solid var(--border-gold);
+      border-radius: 14px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .log-entry-meta {
+      font-size: 12px;
+      color: var(--gold-bright);
+      font-weight: 700;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .log-entry-pre {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: #e6d5b8;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div class="logs-container">
+    <div class="parchment-card">
+      <div class="card-header-flex">
+        <h3>🔍 Walk to Mordor — Remote Client Diagnostic Logs</h3>
+        <button id="btn-refresh-logs" class="btn-primary-gold">↻ Refresh Logs</button>
+      </div>
+      <p class="card-sub">
+        Automatically receives diagnostic logs uploaded whenever <strong>🔄 Sync Day's Walks with Google</strong> is triggered on your OnePlus Nord.
+      </p>
+      <div id="logs-status" class="card-sub">Loading recent diagnostic logs...</div>
+    </div>
+    <div id="logs-list"></div>
+  </div>
+
+  <script type="module">
+    const RELAY_POLL_URL = 'https://ntfy.sh/wtm-diag-04510596/json?poll=1&since=24h';
+    const statusEl = document.getElementById('logs-status');
+    const listEl = document.getElementById('logs-list');
+
+    async function fetchLogs() {
+      statusEl.textContent = 'Fetching uploaded client logs...';
+      try {
+        const resp = await fetch(RELAY_POLL_URL);
+        const text = await resp.text();
+        const items = text
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line);
+            } catch (_e) {
+              return null;
+            }
+          })
+          .filter((item) => item && item.event === 'message' && item.message !== 'test-ping')
+          .reverse();
+
+        if (items.length === 0) {
+          statusEl.textContent = 'No diagnostic logs uploaded yet in the last 24h. Tap "Sync Day\'s Walks with Google" in the app to upload one automatically.';
+          listEl.innerHTML = '';
+          return;
+        }
+
+        statusEl.textContent = `Showing ${items.length} uploaded diagnostic log(s):`;
+        listEl.innerHTML = items
+          .map((item) => {
+            const ts = new Date((item.time || 0) * 1000).toISOString();
+            const safeMsg = String(item.message || '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+            return `
+              <div class="log-entry-card">
+                <div class="log-entry-meta">
+                  <span>Log ID: ${item.id}</span>
+                  <span>${ts}</span>
+                </div>
+                <pre class="log-entry-pre">${safeMsg}</pre>
+              </div>
+            `;
+          })
+          .join('');
+      } catch (err) {
+        statusEl.textContent = `Could not load logs: ${err.message}`;
+      }
+    }
+
+    document.getElementById('btn-refresh-logs').addEventListener('click', fetchLogs);
+    fetchLogs();
+  </script>
+</body>
+</html>
