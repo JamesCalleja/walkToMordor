@@ -941,8 +941,11 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
   state.googleAuthToken = token;
   saveState();
 
-  const startMillis = Date.parse(`${dateStr}T00:00:00.000Z`);
-  const endMillis = Date.parse(`${dateStr}T23:59:59.999Z`);
+  // Use local calendar day boundaries (with fallback to UTC parse) so morning/evening walks match local date
+  const localStart = new Date(`${dateStr}T00:00:00`).getTime();
+  const localEnd = new Date(`${dateStr}T23:59:59.999`).getTime();
+  const startMillis = Number.isNaN(localStart) ? Date.parse(`${dateStr}T00:00:00.000Z`) : localStart;
+  const endMillis = Number.isNaN(localEnd) ? Date.parse(`${dateStr}T23:59:59.999Z`) : localEnd;
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
 
   if (!doFetch) {
@@ -953,23 +956,26 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     feedback.textContent = `🔄 Syncing your walking travel for ${dateStr}...`;
   }
 
-  let response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      aggregateBy: [
-        { dataTypeName: 'com.google.distance.delta' },
-        { dataTypeName: 'com.google.step_count.delta' }
-      ],
-      bucketByActivitySegment: {
-        minDurationMillis: 1000
+  const postAggregate = (bodyObj) =>
+    doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
       },
-      startTimeMillis: startMillis,
-      endTimeMillis: endMillis
-    })
+      body: JSON.stringify(bodyObj)
+    });
+
+  let response = await postAggregate({
+    aggregateBy: [
+      { dataTypeName: 'com.google.distance.delta' },
+      { dataTypeName: 'com.google.step_count.delta' }
+    ],
+    bucketByActivitySegment: {
+      minDurationMillis: 1000
+    },
+    startTimeMillis: startMillis,
+    endTimeMillis: endMillis
   });
 
   // If cached token expired (HTTP 401) and we have an app Client ID, refresh via Google Sign-In once
@@ -979,23 +985,16 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     saveState();
     try {
       token = await requestGoogleAccessToken(effectiveClientId);
-      response = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
+      response = await postAggregate({
+        aggregateBy: [
+          { dataTypeName: 'com.google.distance.delta' },
+          { dataTypeName: 'com.google.step_count.delta' }
+        ],
+        bucketByActivitySegment: {
+          minDurationMillis: 1000
         },
-        body: JSON.stringify({
-          aggregateBy: [
-            { dataTypeName: 'com.google.distance.delta' },
-            { dataTypeName: 'com.google.step_count.delta' }
-          ],
-          bucketByActivitySegment: {
-            minDurationMillis: 1000
-          },
-          startTimeMillis: startMillis,
-          endTimeMillis: endMillis
-        })
+        startTimeMillis: startMillis,
+        endTimeMillis: endMillis
       });
     } catch (err) {
       if (feedback) feedback.textContent = err.message;
@@ -1003,13 +1002,15 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     }
   }
 
-  if (!response.ok) {
+  if (response.status === 401 || response.status === 403 || response.status >= 500) {
     const errText = `Google API returned HTTP ${response.status}. Please sign in again to sync your walks.`;
     if (feedback) feedback.textContent = errText;
     return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: errText };
   }
 
-  const payload = await response.json();
+  // Note: HTTP 400 on bucketByActivitySegment occurs when the Google account has no default
+  // activity.segment or distance.delta stream yet; we continue to bucketByTime & dataSources!
+  const payload = response.ok ? await response.json() : { bucket: [] };
   const buckets = Array.isArray(payload?.bucket) ? payload.bucket : [];
 
   if (!Array.isArray(state.syncedTimelineIds)) {
@@ -1058,67 +1059,164 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     segmentsCount += 1;
   });
 
-  // Fallback: If no explicit activity segments were recorded (common on Android when passive step/distance
-  // tracking runs in the background without starting a workout session), query bucketByTime for the day!
+  // Fallback: If no explicit activity segments were returned (or if bucketByActivitySegment returned 400
+  // because no default activity.segment / distance.delta stream exists), dynamically query bucketByTime
+  // and raw/derived dataSources for steps, distance, and location history!
   if (addedKm === 0 && skippedCount === 0) {
-    try {
-      const timeResp = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          aggregateBy: [
-            { dataTypeName: 'com.google.step_count.delta' },
-            { dataTypeName: 'com.google.distance.delta' }
-          ],
-          bucketByTime: {
-            durationMillis: Math.max(1000, endMillis - startMillis)
-          },
-          startTimeMillis: startMillis,
-          endTimeMillis: endMillis
-        })
-      });
+    let daySteps = 0;
+    let dayDistMeters = 0;
+    const durationMillis = Math.max(1000, endMillis - startMillis);
 
-      if (timeResp && timeResp.ok) {
-        const timePayload = await timeResp.json();
-        const timeBuckets = Array.isArray(timePayload?.bucket) ? timePayload.bucket : [];
-        let daySteps = 0;
-        let dayDistMeters = 0;
-        timeBuckets.forEach((tb) => {
-          (tb.dataset || []).forEach((ds) => {
-            (ds.point || []).forEach((pt) => {
-              (pt.value || []).forEach((v) => {
-                if (typeof v.intVal === 'number') daySteps += v.intVal;
-                if (typeof v.fpVal === 'number') dayDistMeters += v.fpVal;
-              });
+    const extractBucketTotals = async (resp) => {
+      if (!resp || !resp.ok) return { steps: 0, meters: 0 };
+      const data = await resp.json();
+      let steps = 0;
+      let meters = 0;
+      (data?.bucket || []).forEach((tb) => {
+        (tb.dataset || []).forEach((ds) => {
+          (ds.point || []).forEach((pt) => {
+            (pt.value || []).forEach((v) => {
+              if (typeof v.intVal === 'number') steps += v.intVal;
+              if (typeof v.fpVal === 'number') meters += v.fpVal;
             });
           });
         });
+      });
+      return { steps, meters };
+    };
 
-        const kmFromSteps = daySteps / state.stepsPerKm;
-        const kmFromDist = dayDistMeters / 1000;
-        // Prefer step-based km when steps exist so vehicle distance is never accidentally included;
-        // if distance is close to step distance (within 1.6x), allow whichever is higher.
-        let totalDayWalkKm = 0;
-        if (daySteps > 0) {
-          totalDayWalkKm = kmFromDist <= kmFromSteps * 1.6 ? Math.max(kmFromSteps, kmFromDist) : kmFromSteps;
-        } else if (kmFromDist > 0) {
-          totalDayWalkKm = kmFromDist;
-        }
-        totalDayWalkKm = Math.round(totalDayWalkKm * 10000) / 10000;
+    try {
+      // 1. Try combined bucketByTime first
+      const combinedResp = await postAggregate({
+        aggregateBy: [
+          { dataTypeName: 'com.google.step_count.delta' },
+          { dataTypeName: 'com.google.distance.delta' }
+        ],
+        bucketByTime: { durationMillis },
+        startTimeMillis: startMillis,
+        endTimeMillis: endMillis
+      });
+      const comb = await extractBucketTotals(combinedResp);
+      daySteps = Math.max(daySteps, comb.steps);
+      dayDistMeters = Math.max(dayDistMeters, comb.meters);
 
-        if (totalDayWalkKm > 0) {
-          const prevSyncedKm = Number(state.syncedDailyTotals[dateStr]) || 0;
-          const deltaKm = Math.round((totalDayWalkKm - prevSyncedKm) * 10000) / 10000;
-          if (deltaKm >= 0.01) {
-            state.syncedDailyTotals[dateStr] = totalDayWalkKm;
-            addedKm = deltaKm;
-            segmentsCount = 1;
-          } else if (prevSyncedKm > 0) {
-            skippedCount = 1;
+      // 2. If combined returned 0 (e.g. missing distance.delta default stream caused HTTP 400),
+      // query step_count.delta and estimated_steps individually
+      if (daySteps === 0 && dayDistMeters === 0) {
+        const stepQueries = [
+          { dataSourceId: 'derived:com.google.step_count.delta:com.google.android.gms:estimated_steps' },
+          { dataTypeName: 'com.google.step_count.delta' },
+          { dataSourceId: 'derived:com.google.distance.delta:com.google.android.gms:merge_distance_delta' },
+          { dataTypeName: 'com.google.distance.delta' }
+        ];
+        for (const aggItem of stepQueries) {
+          try {
+            const singleResp = await postAggregate({
+              aggregateBy: [aggItem],
+              bucketByTime: { durationMillis },
+              startTimeMillis: startMillis,
+              endTimeMillis: endMillis
+            });
+            const tot = await extractBucketTotals(singleResp);
+            daySteps = Math.max(daySteps, tot.steps);
+            dayDistMeters = Math.max(dayDistMeters, tot.meters);
+          } catch (_err) {
+            // Continue to next stream
           }
+        }
+      }
+
+      // 3. If aggregate buckets are still 0, dynamically inspect all user dataSources (steps, distance, location.sample)
+      if (daySteps === 0 && dayDistMeters === 0) {
+        const dsResp = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataSources', {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (dsResp && dsResp.ok) {
+          const dsPayload = await dsResp.json();
+          const sources = Array.isArray(dsPayload?.dataSource) ? dsPayload.dataSource : [];
+          const startNs = `${startMillis}000000`;
+          const endNs = `${endMillis}000000`;
+
+          for (const src of sources) {
+            const streamId = src?.dataStreamId;
+            const dtName = src?.dataType?.name || '';
+            if (
+              !streamId ||
+              (!dtName.includes('step_count.delta') &&
+                !dtName.includes('distance.delta') &&
+                !dtName.includes('location.sample'))
+            ) {
+              continue;
+            }
+            try {
+              const ptsResp = await doFetch(
+                `https://www.googleapis.com/fitness/v1/users/me/dataSources/${encodeURIComponent(streamId)}/datasets/${startNs}-${endNs}`,
+                {
+                  method: 'GET',
+                  headers: { Authorization: `Bearer ${token}` }
+                }
+              );
+              if (!ptsResp || !ptsResp.ok) continue;
+              const ptsData = await ptsResp.json();
+              const points = Array.isArray(ptsData?.point) ? ptsData.point : [];
+              let streamSteps = 0;
+              let streamMeters = 0;
+              const locCoords = [];
+
+              points.forEach((pt) => {
+                const vals = pt.value || [];
+                if (dtName.includes('location.sample') && vals.length >= 2) {
+                  const lat = vals[0]?.fpVal;
+                  const lng = vals[1]?.fpVal;
+                  if (typeof lat === 'number' && typeof lng === 'number') {
+                    locCoords.push([lat, lng]);
+                  }
+                } else {
+                  vals.forEach((v) => {
+                    if (typeof v.intVal === 'number') streamSteps += v.intVal;
+                    if (typeof v.fpVal === 'number') streamMeters += v.fpVal;
+                  });
+                }
+              });
+
+              if (locCoords.length >= 2) {
+                let locKm = 0;
+                for (let i = 1; i < locCoords.length; i++) {
+                  const legKm = haversineKm(locCoords[i - 1], locCoords[i]);
+                  if (legKm <= 2.0) locKm += legKm;
+                }
+                streamMeters = Math.max(streamMeters, locKm * 1000);
+              }
+
+              daySteps = Math.max(daySteps, streamSteps);
+              dayDistMeters = Math.max(dayDistMeters, streamMeters);
+            } catch (_streamErr) {
+              // Continue checking remaining streams
+            }
+          }
+        }
+      }
+
+      const kmFromSteps = daySteps / state.stepsPerKm;
+      const kmFromDist = dayDistMeters / 1000;
+      let totalDayWalkKm = 0;
+      if (daySteps > 0) {
+        totalDayWalkKm = kmFromDist <= kmFromSteps * 1.6 ? Math.max(kmFromSteps, kmFromDist) : kmFromSteps;
+      } else if (kmFromDist > 0) {
+        totalDayWalkKm = kmFromDist;
+      }
+      totalDayWalkKm = Math.round(totalDayWalkKm * 10000) / 10000;
+
+      if (totalDayWalkKm > 0) {
+        const prevSyncedKm = Number(state.syncedDailyTotals[dateStr]) || 0;
+        const deltaKm = Math.round((totalDayWalkKm - prevSyncedKm) * 10000) / 10000;
+        if (deltaKm >= 0.01) {
+          state.syncedDailyTotals[dateStr] = totalDayWalkKm;
+          addedKm = deltaKm;
+          segmentsCount = 1;
+        } else if (prevSyncedKm > 0) {
+          skippedCount = 1;
         }
       }
     } catch (_e) {
@@ -1138,7 +1236,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     }
   } else {
     if (feedback) {
-      feedback.textContent = `No new walking travel found in Google Cloud for ${dateStr}. Note: Android stores Google Maps Timeline on-device — ensure the Google Fit app is active on your phone for cloud sync, or tap "Import On-Device Timeline.json" above.`;
+      feedback.textContent = `No new walking travel found for ${dateStr}.`;
     }
   }
 
