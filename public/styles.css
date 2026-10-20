@@ -1066,11 +1066,20 @@ html, body {
 
 .setting-item {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  max-width: 100%;
+  overflow: hidden;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(140, 107, 50, 0.22);
+}
+
+.setting-item > div:first-child {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .setting-item:last-child {
@@ -1092,11 +1101,23 @@ html, body {
   color: var(--text-cream);
   font-size: 14px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .setting-btn-group {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+}
+
+.setting-btn-group > * {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .file-label {
