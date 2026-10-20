@@ -1094,11 +1094,31 @@ function activateNativeGoogleMapsEngine(apiKey) {
     gmapsMeInstance = new window.google.maps.Map(gmapsContainer, {
       center: toLatLng([550, 900]),
       zoom: 6,
-      mapTypeId: 'terrain',
+      mapTypeId: 'middle_earth_backdrop',
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false,
       disableDefaultUI: true,
       zoomControl: true,
-      backgroundColor: '#17120c'
+      backgroundColor: 'rgba(0, 0, 0, 0)'
     });
+
+    // Register an empty/transparent base map type so real-world Google Maps terrain/road tiles
+    // never appear as the backdrop behind the Middle-earth map; instead, the Eye of Sauron
+    // wallpaper backdrop shines through behind the Middle-earth GroundOverlay.
+    if (window.google.maps.ImageMapType && gmapsMeInstance?.mapTypes?.set) {
+      const blankMapType = new window.google.maps.ImageMapType({
+        getTileUrl: () => null,
+        tileSize: window.google.maps.Size ? new window.google.maps.Size(256, 256) : { width: 256, height: 256 },
+        maxZoom: 12,
+        minZoom: 3,
+        name: 'Middle-earth'
+      });
+      gmapsMeInstance.mapTypes.set('middle_earth_backdrop', blankMapType);
+      if (typeof gmapsMeInstance.setMapTypeId === 'function') {
+        gmapsMeInstance.setMapTypeId('middle_earth_backdrop');
+      }
+    }
 
     const imageBounds = {
       south: -500 * 0.02,
@@ -1538,6 +1558,7 @@ function setupEventListeners() {
   document.getElementById('btn-save-gmaps-key').addEventListener('click', () => {
     const key = document.getElementById('input-gmaps-api-key').value.trim();
     state.gmapsApiKey = key;
+    state.useNativeGmapsOnMiddleEarth = Boolean(key);
     saveState();
     activateNativeGoogleMapsEngine(key);
     switchTab('tab-map');
@@ -1545,6 +1566,7 @@ function setupEventListeners() {
 
   document.getElementById('btn-clear-gmaps-key').addEventListener('click', () => {
     state.gmapsApiKey = '';
+    state.useNativeGmapsOnMiddleEarth = false;
     document.getElementById('input-gmaps-api-key').value = '';
     saveState();
     activateNativeGoogleMapsEngine('');
@@ -1669,8 +1691,13 @@ function applyWallpaper() {
   const wpUrl = state.customWallpaper
     ? `url("${state.customWallpaper.replace(/"/g, '\\"')}")`
     : `url('./assets/eyeOfSauron.jpg')`;
+  const bgValue = `radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), ${wpUrl}`;
   document.documentElement.style.setProperty('--custom-wallpaper', wpUrl);
-  document.body.style.backgroundImage = `radial-gradient(circle at 50% 25%, rgba(20, 10, 6, 0.25) 0%, rgba(10, 6, 4, 0.7) 100%), ${wpUrl}`;
+  document.body.style.backgroundImage = bgValue;
+  const tabMapEl = document.getElementById('tab-map');
+  if (tabMapEl?.style) {
+    tabMapEl.style.backgroundImage = bgValue;
+  }
 }
 
 function initApp() {
@@ -1682,7 +1709,9 @@ function initApp() {
 
   if (state.gmapsApiKey) {
     document.getElementById('input-gmaps-api-key').value = state.gmapsApiKey;
-    activateNativeGoogleMapsEngine(state.gmapsApiKey);
+    if (state.useNativeGmapsOnMiddleEarth) {
+      activateNativeGoogleMapsEngine(state.gmapsApiKey);
+    }
   }
 
   if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
@@ -1715,6 +1744,7 @@ export {
   importTimelineWalksToQuest,
   pollGoogleDailyWalks,
   parseGoogleMapsUrl,
+  activateNativeGoogleMapsEngine,
   addWalkLog,
   renderMiddleEarthProgress,
   updateHudAndCards,

@@ -11,6 +11,7 @@ import {
   importTimelineWalksToQuest,
   pollGoogleDailyWalks,
   parseGoogleMapsUrl,
+  activateNativeGoogleMapsEngine,
   getPlottedKm,
   clearPlottedRoute,
   switchTab,
@@ -764,6 +765,71 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.equal(res.addedKm, 4.2);
     assert.equal(res.segmentsCount, 1);
     assert.equal(getTotalKmWalked(), 4.2);
+  });
+
+  it('Issue #12: Middle-earth map page uses Eye of Sauron backdrop by default even when gmapsApiKey is set, and native Google Maps engine uses transparent backdrop instead of Google Maps terrain tiles', () => {
+    // 1. Even when a Google Maps API key is present from GitHub Secrets on startup,
+    // the Middle-earth map tab keeps the transparent Leaflet canvas over the Eye of Sauron backdrop
+    state.gmapsApiKey = 'AIzaSyTestKeyFromSecrets';
+    state.useNativeGmapsOnMiddleEarth = false;
+    initApp();
+
+    const tabMap = env.elementsById.get('tab-map');
+    const meCanvas = env.elementsById.get('middle-earth-map');
+    const gmapsCanvas = env.elementsById.get('gmaps-middle-earth');
+
+    assert.match(globalThis.document.body.style.backgroundImage, /eyeOfSauron\.jpg/);
+    assert.match(tabMap.style.backgroundImage, /eyeOfSauron\.jpg/);
+    assert.ok(!meCanvas.classList.contains('hidden'), '#middle-earth-map should remain visible over Eye of Sauron backdrop');
+    assert.ok(gmapsCanvas.classList.contains('hidden'), '#gmaps-middle-earth should remain hidden unless explicitly activated');
+
+    // 2. Even if the user explicitly activates the Native Google Maps engine, it must use a
+    // transparent backgroundColor and blank ImageMapType ('middle_earth_backdrop') rather than 'terrain'
+    let capturedMapOptions = null;
+    const registeredMapTypes = new Map();
+    globalThis.window.google = {
+      maps: {
+        Size: class {
+          constructor(w, h) {
+            this.width = w;
+            this.height = h;
+          }
+        },
+        ImageMapType: class {
+          constructor(opts) {
+            this.opts = opts;
+          }
+        },
+        Map: class {
+          constructor(_el, opts) {
+            capturedMapOptions = opts;
+            this.mapTypes = {
+              set: (id, mt) => registeredMapTypes.set(id, mt)
+            };
+          }
+          setMapTypeId(id) {
+            this.activeMapTypeId = id;
+          }
+        },
+        GroundOverlay: class {
+          setMap() {}
+        },
+        Polyline: class {
+          setMap() {}
+        },
+        Marker: class {
+          setMap() {}
+        }
+      }
+    };
+
+    activateNativeGoogleMapsEngine('AIzaSyTestKeyFromSecrets');
+    assert.ok(capturedMapOptions, 'Google Maps instance should be initialized when explicitly activated');
+    assert.notEqual(capturedMapOptions.mapTypeId, 'terrain', 'Must not use Google Maps terrain tiles as Middle-earth backdrop');
+    assert.equal(capturedMapOptions.mapTypeId, 'middle_earth_backdrop');
+    assert.equal(capturedMapOptions.backgroundColor, 'rgba(0, 0, 0, 0)');
+    assert.ok(registeredMapTypes.has('middle_earth_backdrop'));
+    assert.equal(registeredMapTypes.get('middle_earth_backdrop').opts.getTileUrl(), null);
   });
 });
 
