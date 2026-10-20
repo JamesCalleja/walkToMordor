@@ -1,4 +1,4 @@
-const CACHE_NAME = 'walk-to-mordor-pwa-v9';
+const CACHE_NAME = 'walk-to-mordor-pwa-v10';
 const ASSETS = [
   './',
   './index.html',

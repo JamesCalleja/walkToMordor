@@ -251,23 +251,14 @@
                 <input type="date" id="input-timeline-date" />
               </div>
 
-              <div class="gmaps-actions-row" style="margin-bottom: 12px;">
+              <div class="gmaps-actions-row">
                 <button type="button" id="btn-poll-google-timeline" class="btn-primary-gold full-width">
                   🔄 Sync Day's Walks with Google
                 </button>
-              </div>
-
-              <div class="form-group">
-                <label for="input-gmaps-url">Or Import a Shared Google Maps Walking Link</label>
-                <input type="text" id="input-gmaps-url" placeholder="https://www.google.com/maps/dir/..." />
-              </div>
-              <div class="gmaps-actions-row">
-                <button type="button" id="btn-launch-gmaps-directions" class="btn-secondary-bronze">
-                  🗺️ Open Google Maps
-                </button>
-                <button type="button" id="btn-parse-gmaps-url" class="btn-secondary-bronze">
-                  Plot Shared Link
-                </button>
+                <label class="btn-secondary-bronze file-label full-width" style="justify-content: center; cursor: pointer;">
+                  📂 Import On-Device Timeline.json
+                  <input type="file" id="input-timeline-file" accept=".json,application/json" hidden />
+                </label>
               </div>
               <div id="gmaps-parse-feedback" class="feedback-msg hidden"></div>
             </div>
