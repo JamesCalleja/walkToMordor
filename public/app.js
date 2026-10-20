@@ -871,7 +871,7 @@ const GOOGLE_FITNESS_SCOPES =
  * Triggers the standard "Sign in with Google" OAuth 2.0 popup using the app's
  * configured GOOGLE_CLIENT_ID so end users never have to create keys or tokens.
  */
-function requestGoogleAccessToken(clientId) {
+function requestGoogleAccessToken(clientId, promptMode = '') {
   return new Promise((resolve, reject) => {
     if (!window.google?.accounts?.oauth2) {
       reject(new Error('Google Sign-In service is still loading. Please try again in a moment.'));
@@ -892,52 +892,81 @@ function requestGoogleAccessToken(clientId) {
         resolve(resp.access_token);
       }
     });
-    tokenClient.requestAccessToken({ prompt: '' });
+    tokenClient.requestAccessToken({ prompt: promptMode });
   });
 }
 
 /**
- * Polls Google Fitness REST API (`dataset:aggregate`) for all walking segments on `targetDateStr`
+ * Polls Google Fitness REST API (`dataset:aggregate`, `sessions`, and `dataSources`) for all walking
+ * travel on `targetDateStr`, logs detailed diagnostic trace output to `#gmaps-debug-output`,
  * and adds un-synced walks directly to the Fellowship Quest log.
  */
-async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetchImpl } = {}) {
+async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetchImpl, forceConsent = false } = {}) {
   const feedback = document.getElementById('gmaps-parse-feedback');
   if (feedback) feedback.classList.remove('hidden');
+
+  const debugPanel = document.getElementById('gmaps-debug-panel');
+  const debugOut = document.getElementById('gmaps-debug-output');
+  const debugLines = [];
+  const logDebug = (msg) => {
+    const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+    debugLines.push(line);
+    if (debugPanel) debugPanel.classList.remove('hidden');
+    if (debugOut) debugOut.textContent = debugLines.join('\n');
+    console.log('[GoogleSync]', msg);
+  };
 
   const dateStr =
     targetDateStr ||
     document.getElementById('input-timeline-date')?.value ||
     new Date().toISOString().slice(0, 10);
 
+  logDebug(`Starting Google Walk Sync (v12) for date=${dateStr}`);
+
+  if (forceConsent) {
+    state.googleAuthToken = '';
+    state.googleTokenExpiry = 0;
+    saveState();
+    logDebug('Cleared cached OAuth token (forcing fresh consent)');
+  }
+
   let token = (accessToken || '').trim();
+  let tokenSource = token ? 'explicit-arg' : 'none';
   if (!token && state.googleAuthToken && (!state.googleTokenExpiry || Date.now() < state.googleTokenExpiry)) {
     token = state.googleAuthToken.trim();
+    tokenSource = `cached (expires in ${Math.round(((state.googleTokenExpiry || 0) - Date.now()) / 1000)}s)`;
   }
 
   const effectiveClientId = (clientId || state.googleClientId || DEFAULT_GOOGLE_CLIENT_ID || '').trim();
+  logDebug(`Client ID configured: ${effectiveClientId ? `${effectiveClientId.slice(0, 14)}...` : 'MISSING'}`);
 
   if (!token && effectiveClientId) {
     try {
       if (feedback) {
         feedback.textContent = 'Opening Google Sign-In to sync your daily walks...';
       }
-      token = await requestGoogleAccessToken(effectiveClientId);
+      logDebug(`Requesting OAuth token via Google Identity Services (prompt="${forceConsent ? 'consent' : ''}")...`);
+      token = await requestGoogleAccessToken(effectiveClientId, forceConsent ? 'consent' : '');
+      tokenSource = 'fresh-oauth-popup';
     } catch (err) {
+      logDebug(`OAuth error: ${err.message}`);
       if (feedback) {
         feedback.textContent = err.message || 'Could not complete Google Sign-In.';
       }
-      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message };
+      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message, debugLog: debugLines };
     }
   }
 
   if (!token) {
+    logDebug('Aborting: No OAuth token available.');
     if (feedback) {
       feedback.textContent =
         'Google Sign-In is not configured yet (set GOOGLE_CLIENT_ID in GitHub Secrets).';
     }
-    return { addedKm: 0, segmentsCount: 0, skippedCount: 0 };
+    return { addedKm: 0, segmentsCount: 0, skippedCount: 0, debugLog: debugLines };
   }
 
+  logDebug(`Using token from: ${tokenSource}`);
   state.googleAuthToken = token;
   saveState();
 
@@ -946,6 +975,8 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
   const localEnd = new Date(`${dateStr}T23:59:59.999`).getTime();
   const startMillis = Number.isNaN(localStart) ? Date.parse(`${dateStr}T00:00:00.000Z`) : localStart;
   const endMillis = Number.isNaN(localEnd) ? Date.parse(`${dateStr}T23:59:59.999Z`) : localEnd;
+  logDebug(`Window: ${new Date(startMillis).toISOString()} -> ${new Date(endMillis).toISOString()} (${startMillis}..${endMillis})`);
+
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
 
   if (!doFetch) {
@@ -955,6 +986,30 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
   if (feedback) {
     feedback.textContent = `🔄 Syncing your walking travel for ${dateStr}...`;
   }
+
+  // Optional tokeninfo check (only when using live browser fetch so unit test mocks aren't affected)
+  if (!fetchImpl) {
+    try {
+      const tiResp = await doFetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`);
+      if (tiResp && tiResp.ok) {
+        const ti = await tiResp.json();
+        logDebug(`Token scopes: ${ti.scope || 'none'} (expires_in=${ti.expires_in}s)`);
+      } else if (tiResp) {
+        logDebug(`Tokeninfo status: HTTP ${tiResp.status}`);
+      }
+    } catch (_tiErr) {
+      // Ignore tokeninfo network error
+    }
+  }
+
+  const readErrorSnippet = async (resp) => {
+    try {
+      const txt = typeof resp.text === 'function' ? await resp.text() : JSON.stringify(await resp.json());
+      return String(txt).slice(0, 220);
+    } catch (_e) {
+      return '';
+    }
+  };
 
   const postAggregate = (bodyObj) =>
     doFetch('https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate', {
@@ -977,6 +1032,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     startTimeMillis: startMillis,
     endTimeMillis: endMillis
   });
+  logDebug(`Step 1 (bucketByActivitySegment): HTTP ${response.status}`);
 
   // If cached token expired (HTTP 401) and we have an app Client ID, refresh via Google Sign-In once
   if (response.status === 401 && !accessToken && effectiveClientId && window.google?.accounts?.oauth2) {
@@ -984,6 +1040,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     state.googleTokenExpiry = 0;
     saveState();
     try {
+      logDebug('Token expired (401); requesting fresh token...');
       token = await requestGoogleAccessToken(effectiveClientId);
       response = await postAggregate({
         aggregateBy: [
@@ -996,22 +1053,32 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         startTimeMillis: startMillis,
         endTimeMillis: endMillis
       });
+      logDebug(`Step 1 retry (bucketByActivitySegment): HTTP ${response.status}`);
     } catch (err) {
+      logDebug(`Retry error: ${err.message}`);
       if (feedback) feedback.textContent = err.message;
-      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message };
+      return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: err.message, debugLog: debugLines };
     }
   }
 
   if (response.status === 401 || response.status === 403 || response.status >= 500) {
-    const errText = `Google API returned HTTP ${response.status}. Please sign in again to sync your walks.`;
+    const errDetail = await readErrorSnippet(response);
+    logDebug(`Step 1 fatal HTTP ${response.status}: ${errDetail}`);
+    const errText = `Google API returned HTTP ${response.status}. Tap "🔑 Re-Sign In" below to re-authorize.`;
     if (feedback) feedback.textContent = errText;
-    return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: errText };
+    return { addedKm: 0, segmentsCount: 0, skippedCount: 0, error: errText, debugLog: debugLines };
+  }
+
+  if (!response.ok) {
+    const errDetail = await readErrorSnippet(response);
+    logDebug(`Step 1 non-200 (${response.status}): ${errDetail}`);
   }
 
   // Note: HTTP 400 on bucketByActivitySegment occurs when the Google account has no default
   // activity.segment or distance.delta stream yet; we continue to bucketByTime & dataSources!
   const payload = response.ok ? await response.json() : { bucket: [] };
   const buckets = Array.isArray(payload?.bucket) ? payload.bucket : [];
+  logDebug(`Step 1 buckets count: ${buckets.length}`);
 
   if (!Array.isArray(state.syncedTimelineIds)) {
     state.syncedTimelineIds = [];
@@ -1038,6 +1105,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     });
 
     const activityCode = Number(b.activity);
+    logDebug(`  Bucket[${idx}]: activity=${activityCode}, steps=${steps}, distMeters=${distMeters.toFixed(1)}`);
     const isExplicitWalk = WALKING_FIT_ACTIVITY_CODES.has(activityCode);
     const isPassiveStepWalk = PASSIVE_STEP_FIT_ACTIVITY_CODES.has(activityCode) && steps > 0;
     if (!isExplicitWalk && !isPassiveStepWalk) return;
@@ -1067,14 +1135,21 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     let dayDistMeters = 0;
     const durationMillis = Math.max(1000, endMillis - startMillis);
 
-    const extractBucketTotals = async (resp) => {
-      if (!resp || !resp.ok) return { steps: 0, meters: 0 };
+    const extractBucketTotals = async (resp, label) => {
+      if (!resp) return { steps: 0, meters: 0 };
+      if (!resp.ok) {
+        const errSnip = await readErrorSnippet(resp);
+        logDebug(`  ${label}: HTTP ${resp.status} ${errSnip}`);
+        return { steps: 0, meters: 0 };
+      }
       const data = await resp.json();
       let steps = 0;
       let meters = 0;
+      let ptsCount = 0;
       (data?.bucket || []).forEach((tb) => {
         (tb.dataset || []).forEach((ds) => {
           (ds.point || []).forEach((pt) => {
+            ptsCount += 1;
             (pt.value || []).forEach((v) => {
               if (typeof v.intVal === 'number') steps += v.intVal;
               if (typeof v.fpVal === 'number') meters += v.fpVal;
@@ -1082,6 +1157,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
           });
         });
       });
+      logDebug(`  ${label}: HTTP 200 (points=${ptsCount}, steps=${steps}, meters=${meters.toFixed(1)})`);
       return { steps, meters };
     };
 
@@ -1096,7 +1172,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         startTimeMillis: startMillis,
         endTimeMillis: endMillis
       });
-      const comb = await extractBucketTotals(combinedResp);
+      const comb = await extractBucketTotals(combinedResp, 'Step 2a (bucketByTime combined)');
       daySteps = Math.max(daySteps, comb.steps);
       dayDistMeters = Math.max(dayDistMeters, comb.meters);
 
@@ -1104,20 +1180,20 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
       // query step_count.delta and estimated_steps individually
       if (daySteps === 0 && dayDistMeters === 0) {
         const stepQueries = [
-          { dataSourceId: 'derived:com.google.step_count.delta:com.google.android.gms:estimated_steps' },
-          { dataTypeName: 'com.google.step_count.delta' },
-          { dataSourceId: 'derived:com.google.distance.delta:com.google.android.gms:merge_distance_delta' },
-          { dataTypeName: 'com.google.distance.delta' }
+          { label: 'estimated_steps', agg: { dataSourceId: 'derived:com.google.step_count.delta:com.google.android.gms:estimated_steps' } },
+          { label: 'step_count.delta', agg: { dataTypeName: 'com.google.step_count.delta' } },
+          { label: 'merge_distance_delta', agg: { dataSourceId: 'derived:com.google.distance.delta:com.google.android.gms:merge_distance_delta' } },
+          { label: 'distance.delta', agg: { dataTypeName: 'com.google.distance.delta' } }
         ];
-        for (const aggItem of stepQueries) {
+        for (const item of stepQueries) {
           try {
             const singleResp = await postAggregate({
-              aggregateBy: [aggItem],
+              aggregateBy: [item.agg],
               bucketByTime: { durationMillis },
               startTimeMillis: startMillis,
               endTimeMillis: endMillis
             });
-            const tot = await extractBucketTotals(singleResp);
+            const tot = await extractBucketTotals(singleResp, `Step 2b (${item.label})`);
             daySteps = Math.max(daySteps, tot.steps);
             dayDistMeters = Math.max(dayDistMeters, tot.meters);
           } catch (_err) {
@@ -1126,8 +1202,32 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         }
       }
 
-      // 3. If aggregate buckets are still 0, dynamically inspect all user dataSources (steps, distance, location.sample)
+      // 3. If aggregate buckets are still 0, dynamically inspect all user dataSources & sessions
       if (daySteps === 0 && dayDistMeters === 0) {
+        if (!fetchImpl) {
+          try {
+            const sessUrl = `https://www.googleapis.com/fitness/v1/users/me/sessions?startTime=${encodeURIComponent(
+              new Date(startMillis).toISOString()
+            )}&endTime=${encodeURIComponent(new Date(endMillis).toISOString())}`;
+            const sessResp = await doFetch(sessUrl, {
+              method: 'GET',
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (sessResp && sessResp.ok) {
+              const sessData = await sessResp.json();
+              const sessions = Array.isArray(sessData?.session) ? sessData.session : [];
+              logDebug(`Step 3 (sessions): HTTP 200 (${sessions.length} session(s) found)`);
+              sessions.forEach((s, idx) => {
+                logDebug(`  Session[${idx}]: activityType=${s.activityType}, name="${s.name || ''}", pkg=${s.application?.packageName || ''}`);
+              });
+            } else if (sessResp) {
+              logDebug(`Step 3 (sessions): HTTP ${sessResp.status}`);
+            }
+          } catch (_sessErr) {
+            // Continue to dataSources
+          }
+        }
+
         const dsResp = await doFetch('https://www.googleapis.com/fitness/v1/users/me/dataSources', {
           method: 'GET',
           headers: { Authorization: `Bearer ${token}` }
@@ -1135,17 +1235,22 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         if (dsResp && dsResp.ok) {
           const dsPayload = await dsResp.json();
           const sources = Array.isArray(dsPayload?.dataSource) ? dsPayload.dataSource : [];
+          logDebug(`Step 4 (dataSources): HTTP 200 (${sources.length} total stream(s) on account)`);
           const startNs = `${startMillis}000000`;
           const endNs = `${endMillis}000000`;
 
           for (const src of sources) {
             const streamId = src?.dataStreamId;
             const dtName = src?.dataType?.name || '';
+            const devModel = src?.device?.model || src?.application?.packageName || '';
+            logDebug(`  Stream: ${dtName} | ${streamId} (${devModel})`);
             if (
               !streamId ||
               (!dtName.includes('step_count.delta') &&
+                !dtName.includes('step_count.cumulative') &&
                 !dtName.includes('distance.delta') &&
-                !dtName.includes('location.sample'))
+                !dtName.includes('location.sample') &&
+                !dtName.includes('activity.segment'))
             ) {
               continue;
             }
@@ -1157,11 +1262,15 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
                   headers: { Authorization: `Bearer ${token}` }
                 }
               );
-              if (!ptsResp || !ptsResp.ok) continue;
+              if (!ptsResp || !ptsResp.ok) {
+                logDebug(`    -> dataset HTTP ${ptsResp ? ptsResp.status : 'ERR'}`);
+                continue;
+              }
               const ptsData = await ptsResp.json();
               const points = Array.isArray(ptsData?.point) ? ptsData.point : [];
               let streamSteps = 0;
               let streamMeters = 0;
+              const cumulativeVals = [];
               const locCoords = [];
 
               points.forEach((pt) => {
@@ -1172,6 +1281,11 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
                   if (typeof lat === 'number' && typeof lng === 'number') {
                     locCoords.push([lat, lng]);
                   }
+                } else if (dtName.includes('step_count.cumulative')) {
+                  vals.forEach((v) => {
+                    if (typeof v.intVal === 'number') cumulativeVals.push(v.intVal);
+                    if (typeof v.fpVal === 'number') cumulativeVals.push(v.fpVal);
+                  });
                 } else {
                   vals.forEach((v) => {
                     if (typeof v.intVal === 'number') streamSteps += v.intVal;
@@ -1179,6 +1293,14 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
                   });
                 }
               });
+
+              if (cumulativeVals.length >= 2) {
+                const minC = Math.min(...cumulativeVals);
+                const maxC = Math.max(...cumulativeVals);
+                if (maxC > minC) {
+                  streamSteps = Math.max(streamSteps, maxC - minC);
+                }
+              }
 
               if (locCoords.length >= 2) {
                 let locKm = 0;
@@ -1189,12 +1311,16 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
                 streamMeters = Math.max(streamMeters, locKm * 1000);
               }
 
+              logDebug(`    -> points=${points.length}, steps=${streamSteps}, meters=${streamMeters.toFixed(1)}, locPts=${locCoords.length}`);
               daySteps = Math.max(daySteps, streamSteps);
               dayDistMeters = Math.max(dayDistMeters, streamMeters);
             } catch (_streamErr) {
               // Continue checking remaining streams
             }
           }
+        } else if (dsResp) {
+          const dsErr = await readErrorSnippet(dsResp);
+          logDebug(`Step 4 (dataSources): HTTP ${dsResp.status} ${dsErr}`);
         }
       }
 
@@ -1207,6 +1333,7 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
         totalDayWalkKm = kmFromDist;
       }
       totalDayWalkKm = Math.round(totalDayWalkKm * 10000) / 10000;
+      logDebug(`Computed fallback totals: daySteps=${daySteps}, dayDistMeters=${dayDistMeters.toFixed(1)}, totalDayWalkKm=${totalDayWalkKm}`);
 
       if (totalDayWalkKm > 0) {
         const prevSyncedKm = Number(state.syncedDailyTotals[dateStr]) || 0;
@@ -1219,10 +1346,12 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
           skippedCount = 1;
         }
       }
-    } catch (_e) {
-      // Ignore fallback error and proceed with standard feedback
+    } catch (e) {
+      logDebug(`Fallback error: ${e.message}`);
     }
   }
+
+  logDebug(`Sync result: addedKm=${addedKm}, segmentsCount=${segmentsCount}, skippedCount=${skippedCount}`);
 
   if (addedKm > 0) {
     const note = `Google Timeline Poll (${segmentsCount} walk${segmentsCount > 1 ? 's' : ''})`;
@@ -1236,11 +1365,11 @@ async function pollGoogleDailyWalks({ accessToken, clientId, targetDateStr, fetc
     }
   } else {
     if (feedback) {
-      feedback.textContent = `No new walking travel found for ${dateStr}.`;
+      feedback.textContent = `No new walking travel found for ${dateStr}. Check the Diagnostic Log below for details.`;
     }
   }
 
-  return { addedKm, segmentsCount, skippedCount };
+  return { addedKm, segmentsCount, skippedCount, debugLog: debugLines };
 }
 
 // Parse a pasted Google Maps Timeline JSON snippet or Google Maps URL
@@ -1741,6 +1870,24 @@ function setupEventListeners() {
 
   document.getElementById('btn-poll-google-timeline')?.addEventListener('click', () => {
     pollGoogleDailyWalks();
+  });
+
+  document.getElementById('btn-reauth-google')?.addEventListener('click', () => {
+    pollGoogleDailyWalks({ forceConsent: true });
+  });
+
+  document.getElementById('btn-copy-debug-log')?.addEventListener('click', () => {
+    const txt = document.getElementById('gmaps-debug-output')?.textContent || '';
+    if (txt && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(txt).catch(() => {});
+      const copyBtn = document.getElementById('btn-copy-debug-log');
+      if (copyBtn) {
+        copyBtn.textContent = '✓ Copied!';
+        setTimeout(() => {
+          copyBtn.textContent = '📋 Copy Log';
+        }, 1800);
+      }
+    }
   });
 
   document.getElementById('input-timeline-file')?.addEventListener('change', (e) => {
