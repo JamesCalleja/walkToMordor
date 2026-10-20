@@ -12,6 +12,9 @@ import {
   pollGoogleDailyWalks,
   parseGoogleMapsUrl,
   activateNativeGoogleMapsEngine,
+  getRealWorldTileUrl,
+  updateRealWorldMapTiles,
+  initRealWorldMap,
   getPlottedKm,
   clearPlottedRoute,
   switchTab,
@@ -280,7 +283,8 @@ function setupDomAndMocks() {
   const mapCalls = {
     flyTo: [],
     flyToBounds: [],
-    invalidateSize: 0
+    invalidateSize: 0,
+    tileLayers: []
   };
 
   globalThis.L = {
@@ -324,7 +328,20 @@ function setupDomAndMocks() {
       };
     },
     imageOverlay: () => ({ addTo: () => ({}) }),
-    tileLayer: () => ({ addTo: () => ({}) }),
+    tileLayer: (url, opts) => {
+      const layer = {
+        url,
+        opts,
+        setUrl(nextUrl) {
+          this.url = nextUrl;
+        },
+        addTo() {
+          return this;
+        }
+      };
+      mapCalls.tileLayers.push(layer);
+      return layer;
+    },
     polyline: () => ({
       addTo: function () {
         return this;
@@ -830,6 +847,32 @@ describe('Walk to Mordor App Integration & Issue #3 Regression Suite', () => {
     assert.equal(capturedMapOptions.backgroundColor, 'rgba(0, 0, 0, 0)');
     assert.ok(registeredMapTypes.has('middle_earth_backdrop'));
     assert.equal(registeredMapTypes.get('middle_earth_backdrop').opts.getTileUrl(), null);
+  });
+
+  it('Issue #5: Live GPS & Map uses Google Maps street tiles with populated gmapsApiKey and never uses CartoDB "API KEY REQUIRED" tiles', () => {
+    // 1. When gmapsApiKey is populated from GitHub Secrets on startup, Live GPS & Map (#real-world-map)
+    // immediately uses Google Maps street tiles with key parameter and never calls basemaps.cartocdn.com
+    state.gmapsApiKey = 'AIzaSySecretKey123';
+    initApp();
+
+    assert.equal(env.elementsById.get('input-gmaps-api-key').value, 'AIzaSySecretKey123');
+    const latestTileLayer = env.mapCalls.tileLayers[env.mapCalls.tileLayers.length - 1];
+    assert.ok(latestTileLayer, 'Live GPS & Map tileLayer should be created');
+    assert.doesNotMatch(latestTileLayer.url, /cartocdn/i, 'Must never use CartoDB tiles that display API KEY REQUIRED');
+    assert.match(latestTileLayer.url, /google\.com\/vt\/lyrs=m/);
+    assert.match(latestTileLayer.url, /key=AIzaSySecretKey123/);
+
+    // 2. Updating the key in #input-gmaps-api-key and clicking #btn-save-gmaps-key updates the Live GPS & Map tile URL
+    // and activates the Live GPS & Map walk sub-tab without replacing the Middle-earth map
+    switchTab('tab-walk');
+    document.querySelector('[data-walk-mode="gmaps"]').click();
+    env.elementsById.get('input-gmaps-api-key').value = 'AIzaSyUpdatedKey456';
+    env.elementsById.get('btn-save-gmaps-key').click();
+
+    assert.equal(state.gmapsApiKey, 'AIzaSyUpdatedKey456');
+    assert.match(latestTileLayer.url, /key=AIzaSyUpdatedKey456/);
+    assert.ok(env.elementsById.get('walk-mode-gps').classList.contains('active'), 'Switches to Live GPS & Map view');
+    assert.ok(!env.elementsById.get('middle-earth-map').classList.contains('hidden'), 'Keeps Middle-earth map intact');
   });
 });
 

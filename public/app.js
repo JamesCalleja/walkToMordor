@@ -359,6 +359,7 @@ function updateHudAndCards(prog) {
 // 2. REAL-WORLD GOOGLE MAPS & LIVE GPS WALK TRACKER (TAB 2 - METRIC)
 // ============================================================================
 let realMap = null;
+let realTileLayer = null;
 let realRouteLayer = null;
 let realPointMarkers = [];
 let plottedCoords = [];
@@ -393,8 +394,35 @@ function getPlottedKm() {
   return Math.max(gpsKm, stepKm);
 }
 
+function getRealWorldTileUrl(apiKey = state.gmapsApiKey) {
+  const inputVal =
+    typeof document !== 'undefined' ? document.getElementById('input-gmaps-api-key')?.value : '';
+  const trimmedKey = String(apiKey || state.gmapsApiKey || inputVal || DEFAULT_GMAPS_API_KEY || '').trim();
+  const base = 'https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+  return trimmedKey ? `${base}&key=${encodeURIComponent(trimmedKey)}` : base;
+}
+
+function updateRealWorldMapTiles(apiKey = state.gmapsApiKey) {
+  if (!realMap) return;
+  const nextUrl = getRealWorldTileUrl(apiKey);
+  if (realTileLayer && typeof realTileLayer.setUrl === 'function') {
+    realTileLayer.setUrl(nextUrl);
+  } else {
+    if (realTileLayer && typeof realMap.removeLayer === 'function') {
+      realMap.removeLayer(realTileLayer);
+    }
+    realTileLayer = L.tileLayer(nextUrl, {
+      maxZoom: 20,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    }).addTo(realMap);
+  }
+}
+
 function initRealWorldMap() {
-  if (realMap) return;
+  if (realMap) {
+    updateRealWorldMapTiles(state.gmapsApiKey);
+    return;
+  }
 
   realMap = L.map('real-world-map', {
     center: [DEFAULT_REAL_WORLD_START.lat, DEFAULT_REAL_WORLD_START.lng],
@@ -402,9 +430,11 @@ function initRealWorldMap() {
     attributionControl: false
   });
 
-  // High-contrast street tiles for outdoor visibility on OnePlus Nord
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    maxZoom: 19
+  // High-contrast Google Maps street tiles for outdoor visibility on OnePlus Nord
+  // (Replaces CartoDB basemaps which watermarked tiles with "API KEY REQUIRED")
+  realTileLayer = L.tileLayer(getRealWorldTileUrl(state.gmapsApiKey), {
+    maxZoom: 20,
+    subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
   }).addTo(realMap);
 
   realRouteLayer = L.polyline([], {
@@ -1558,10 +1588,20 @@ function setupEventListeners() {
   document.getElementById('btn-save-gmaps-key').addEventListener('click', () => {
     const key = document.getElementById('input-gmaps-api-key').value.trim();
     state.gmapsApiKey = key;
-    state.useNativeGmapsOnMiddleEarth = Boolean(key);
     saveState();
-    activateNativeGoogleMapsEngine(key);
-    switchTab('tab-map');
+    initRealWorldMap();
+    updateRealWorldMapTiles(key);
+    if (state.useNativeGmapsOnMiddleEarth) {
+      activateNativeGoogleMapsEngine(key);
+    }
+    const feedback = document.getElementById('gmaps-parse-feedback');
+    if (feedback) {
+      feedback.classList.remove('hidden');
+      feedback.textContent = key
+        ? '✓ Google Maps API Key saved and applied to Live GPS & Map!'
+        : 'Cleared custom Google Maps API Key.';
+    }
+    document.querySelector('[data-walk-mode="gps"]')?.click();
   });
 
   document.getElementById('btn-clear-gmaps-key').addEventListener('click', () => {
@@ -1569,8 +1609,8 @@ function setupEventListeners() {
     state.useNativeGmapsOnMiddleEarth = false;
     document.getElementById('input-gmaps-api-key').value = '';
     saveState();
+    updateRealWorldMapTiles('');
     activateNativeGoogleMapsEngine('');
-    switchTab('tab-map');
   });
 
   // Waypoints Filter Chips
@@ -1701,17 +1741,23 @@ function applyWallpaper() {
 }
 
 function initApp() {
+  realMap = null;
+  realTileLayer = null;
   loadState();
   applyWallpaper();
+
+  if (state.gmapsApiKey) {
+    const keyInput = document.getElementById('input-gmaps-api-key');
+    if (keyInput) keyInput.value = state.gmapsApiKey;
+  }
+
   initMiddleEarthMap();
+  initRealWorldMap();
   setupEventListeners();
   renderAllViews(false);
 
-  if (state.gmapsApiKey) {
-    document.getElementById('input-gmaps-api-key').value = state.gmapsApiKey;
-    if (state.useNativeGmapsOnMiddleEarth) {
-      activateNativeGoogleMapsEngine(state.gmapsApiKey);
-    }
+  if (state.gmapsApiKey && state.useNativeGmapsOnMiddleEarth) {
+    activateNativeGoogleMapsEngine(state.gmapsApiKey);
   }
 
   if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
@@ -1738,6 +1784,9 @@ export {
   fitMiddleEarthQuestBounds,
   haversineKm,
   getPlottedKm,
+  getRealWorldTileUrl,
+  updateRealWorldMapTiles,
+  initRealWorldMap,
   addRoutePoint,
   clearPlottedRoute,
   extractTimelineWalksForDate,
